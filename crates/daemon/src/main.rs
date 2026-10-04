@@ -29,10 +29,11 @@ extern "C" fn handle_reload(_: std::ffi::c_int) {
 }
 
 fn main() -> Result<()> {
+    // Log targets are named after the crate, which is the binary's name.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("shiftpaper_daemon=info")),
+                .unwrap_or_else(|_| EnvFilter::new(concat!(env!("CARGO_CRATE_NAME"), "=info"))),
         )
         .init();
 

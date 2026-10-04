@@ -101,10 +101,13 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Logs go to stderr so stdout stays clean for the paths `bake` prints.
+    // Log targets are named after the crate, which is the binary's name.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("shiftpaper_cli=info")),
+                .unwrap_or_else(|_| EnvFilter::new(concat!(env!("CARGO_CRATE_NAME"), "=warn"))),
         )
         .init();
 
