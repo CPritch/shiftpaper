@@ -135,6 +135,9 @@ impl App {
             CompositorState::bind(globals, qh).context("wl_compositor not available")?;
         let output_state = OutputState::new(globals, qh);
         let seat_state = SeatState::new(globals, qh);
+        // SCTK binds the seats that already exist without calling new_seat,
+        // which only hears about seats added later, so take one here.
+        let seat = seat_state.seats().next();
         let layer_shell = LayerShell::bind(globals, qh).map_err(|_| {
             anyhow::anyhow!(
                 "wlr-layer-shell (zwlr_layer_shell_v1) is not available on this compositor.\n\
@@ -167,7 +170,7 @@ impl App {
             render_targets: HashMap::new(),
             cursor: None,
             pointer: None,
-            seat: None,
+            seat,
             idle: None,
             battery_ok: true,
             needs_render: false,
