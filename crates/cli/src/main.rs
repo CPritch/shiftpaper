@@ -66,19 +66,22 @@ enum Command {
         model: Option<PathBuf>,
     },
 
-    /// Download the default depth model from HuggingFace.
+    /// Download a depth model from HuggingFace and make it the one `set`
+    /// and `bake` use.
     ///
-    /// Downloads Depth Anything V2 Small (ONNX) from the onnx-community
-    /// repository to ~/.local/share/shiftpaper/models/ and writes the path
-    /// to [inference] model_path in config.toml. Safe to re-run: the
-    /// download is skipped if the file already exists, unless --force
-    /// is given.
+    /// Without a name, downloads the default model. Files go to
+    /// ~/.local/share/shiftpaper/models/<name>/ and the path is written to
+    /// [inference] model_path in config.toml. Safe to re-run: the download
+    /// is skipped if the files already exist, unless --force is given.
+    /// Each model's weights have their own licence, shown before
+    /// downloading.
     FetchModel {
-        /// Override the download URL. Defaults to the onnx-community
-        /// release on HuggingFace.
-        #[arg(long)]
-        url: Option<String>,
-        /// Re-download even if the file already exists.
+        /// Which model to download. See --list.
+        name: Option<String>,
+        /// List the models that can be downloaded.
+        #[arg(long, conflicts_with = "name")]
+        list: bool,
+        /// Re-download even if the files already exist.
         #[arg(long, short)]
         force: bool,
     },
@@ -124,7 +127,7 @@ fn main() -> Result<()> {
             let model = resolve_model(model)?;
             set(&input, &model)
         }
-        Command::FetchModel { url, force } => fetch_model_cmd(url.as_deref(), force),
+        Command::FetchModel { name, list, force } => fetch_model_cmd(name.as_deref(), list, force),
         Command::Mode { mode } => mode_cmd(mode),
     }
 }
@@ -151,7 +154,7 @@ fn resolve_model(arg: Option<PathBuf>) -> Result<PathBuf> {
         );
     }
     // 3. Default location written by `shiftpaper fetch-model`
-    let default = fetch_model::default_model_path();
+    let default = fetch_model::default_model().path();
     if default.exists() {
         return Ok(default);
     }
@@ -241,11 +244,17 @@ fn update_daemon_config(paths: &cache::BakedPaths, model: &Path) -> Result<()> {
     })
 }
 
-fn fetch_model_cmd(url: Option<&str>, force: bool) -> Result<()> {
-    let dest = fetch_model::default_model_path();
-    let url = url.unwrap_or(fetch_model::DEFAULT_MODEL_URL);
-    fetch_model::fetch_model(url, &dest, force)?;
-    fetch_model::persist_model_path(&dest)?;
+fn fetch_model_cmd(name: Option<&str>, list: bool, force: bool) -> Result<()> {
+    if list {
+        fetch_model::print_list();
+        return Ok(());
+    }
+    let model = match name {
+        Some(name) => fetch_model::find(name)?,
+        None => fetch_model::default_model(),
+    };
+    let path = fetch_model::fetch(model, force)?;
+    fetch_model::persist_model_path(&path)?;
     eprintln!();
     eprintln!("model configured. you can now run:");
     eprintln!("  shiftpaper set ~/Pictures/wallpaper.jpg");
