@@ -3,7 +3,7 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm,
-    output::{OutputHandler, OutputState},
+    output::{OutputHandler, OutputInfo as SctkOutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -39,11 +39,19 @@ use raw_window_handle::{
 pub struct OutputInfo {
     pub name: String,
     pub wl_output: wl_output::WlOutput,
+    /// Surface size in logical pixels, from the layer surface configure.
     pub width: u32,
     pub height: u32,
     pub scale: i32,
-    pub layer_surface: Option<LayerSurface>,
+    pub layer_surface: LayerSurface,
     pub configured: bool,
+}
+
+impl OutputInfo {
+    fn refresh(&mut self, info: &SctkOutputInfo) {
+        self.name = info.name.clone().unwrap_or_default();
+        self.scale = info.scale_factor;
+    }
 }
 
 pub struct App {
@@ -239,46 +247,25 @@ impl App {
         self.render_all(qh);
     }
 
-    pub fn ensure_layer_surfaces(&mut self, qh: &QueueHandle<Self>) {
-        for o in &mut self.outputs {
-            if o.name.is_empty()
-                && let Some(info) = self.output_state.info(&o.wl_output)
-            {
-                o.name = info.name.clone().unwrap_or_default();
-                if let Some(mode) = info.modes.iter().find(|m| m.current) {
-                    o.width = mode.dimensions.0 as u32;
-                    o.height = mode.dimensions.1 as u32;
-                }
-                o.scale = info.scale_factor;
-                debug!(
-                    name = o.name,
-                    w = o.width,
-                    h = o.height,
-                    scale = o.scale,
-                    "filled output info from OutputState"
-                );
-            }
-
-            if !o.name.is_empty() && o.layer_surface.is_none() {
-                let surface = self.compositor_state.create_surface(qh);
-                let layer_surface = self.layer_shell.create_layer_surface(
-                    qh,
-                    surface,
-                    Layer::Background,
-                    Some("shiftpaper"),
-                    Some(&o.wl_output),
-                );
-
-                layer_surface.set_anchor(Anchor::all());
-                layer_surface.set_exclusive_zone(-1);
-                layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-                layer_surface.set_size(0, 0);
-                layer_surface.commit();
-
-                info!(name = o.name, "created layer surface for output");
-                o.layer_surface = Some(layer_surface);
-            }
-        }
+    fn create_layer_surface(
+        &self,
+        qh: &QueueHandle<Self>,
+        output: &wl_output::WlOutput,
+    ) -> LayerSurface {
+        let surface = self.compositor_state.create_surface(qh);
+        let layer_surface = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Background,
+            Some("shiftpaper"),
+            Some(output),
+        );
+        layer_surface.set_anchor(Anchor::all());
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_size(0, 0);
+        layer_surface.commit();
+        layer_surface
     }
 
     pub fn render_all(&self, qh: &QueueHandle<Self>) {
@@ -296,9 +283,8 @@ impl App {
             }
 
             if let Some(render_state) = self.render_targets.get(&output.name) {
-                if let Some(layer) = &output.layer_surface {
-                    layer.wl_surface().frame(qh, layer.wl_surface().clone());
-                }
+                let surface = output.layer_surface.wl_surface();
+                surface.frame(qh, surface.clone());
                 renderer.render_frame(render_state);
             }
         }
@@ -322,9 +308,8 @@ impl App {
             return;
         }
         if let Some(rt) = self.render_targets.get(output_name) {
-            if let Some(layer) = &output.layer_surface {
-                layer.wl_surface().frame(qh, layer.wl_surface().clone());
-            }
+            let surface = output.layer_surface.wl_surface();
+            surface.frame(qh, surface.clone());
             renderer.render_frame(rt);
         }
     }
@@ -383,79 +368,42 @@ impl OutputHandler for App {
         &mut self.output_state
     }
 
+    /// Called once the output's info is complete, both at startup and
+    /// when a monitor is plugged in.
     fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        debug!("new_output: output added, waiting for info");
-        self.outputs.push(OutputInfo {
-            name: String::new(),
-            wl_output: output,
-            width: 1920,
-            height: 1080,
-            scale: 1,
-            layer_surface: None,
-            configured: false,
-        });
-    }
-
-    fn update_output(
         &mut self,
         _conn: &Connection,
         qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        let info = match self.output_state.info(&output) {
-            Some(i) => i,
-            None => {
-                debug!("update_output: no info available yet");
-                return;
-            }
+        let mut o = OutputInfo {
+            name: String::new(),
+            wl_output: output.clone(),
+            width: 0,
+            height: 0,
+            scale: 1,
+            layer_surface: self.create_layer_surface(qh, &output),
+            configured: false,
         };
-
-        let o = match self.outputs.iter_mut().find(|o| o.wl_output == output) {
-            Some(o) => o,
-            None => {
-                warn!("update_output: unknown output");
-                return;
-            }
-        };
-
-        o.name = info.name.clone().unwrap_or_default();
-        if let Some(mode) = info.modes.iter().find(|m| m.current) {
-            o.width = mode.dimensions.0 as u32;
-            o.height = mode.dimensions.1 as u32;
+        if let Some(info) = self.output_state.info(&output) {
+            o.refresh(&info);
         }
-        o.scale = info.scale_factor;
+        info!(name = o.name, "created layer surface for output");
+        self.outputs.push(o);
+    }
 
-        debug!(
-            name = o.name,
-            w = o.width,
-            h = o.height,
-            scale = o.scale,
-            "update_output"
-        );
-
-        if o.layer_surface.is_none() {
-            let surface = self.compositor_state.create_surface(qh);
-            let layer_surface = self.layer_shell.create_layer_surface(
-                qh,
-                surface,
-                Layer::Background,
-                Some("shiftpaper"),
-                Some(&output),
-            );
-
-            layer_surface.set_anchor(Anchor::all());
-            layer_surface.set_exclusive_zone(-1);
-            layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-            layer_surface.set_size(0, 0);
-            layer_surface.commit();
-
-            o.layer_surface = Some(layer_surface);
-            info!(name = o.name, "created layer surface for output");
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        let Some(info) = self.output_state.info(&output) else {
+            return;
+        };
+        if let Some(o) = self.outputs.iter_mut().find(|o| o.wl_output == output) {
+            o.refresh(&info);
+            debug!(name = o.name, scale = o.scale, "output updated");
         }
     }
 
@@ -465,6 +413,8 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        // The wgpu surface holds a raw pointer to the wl_surface, so the
+        // render target must be dropped before the layer surface.
         if let Some(o) = self.outputs.iter().find(|o| o.wl_output == output) {
             info!(name = o.name, "output removed");
             self.render_targets.remove(&o.name);
@@ -488,6 +438,12 @@ impl LayerShellHandler for App {
     ) {
         let (w, h) = (configure.new_size.0, configure.new_size.1);
         debug!(w, h, "layer surface configured");
+        // We anchor to all four edges, so the protocol requires the
+        // compositor to choose a size. wgpu panics on a zero-sized surface.
+        if w == 0 || h == 0 {
+            warn!("configure: compositor sent a zero size, ignoring");
+            return;
+        }
 
         if self.renderer.is_none() {
             info!("initializing wgpu renderer...");
@@ -500,11 +456,7 @@ impl LayerShellHandler for App {
             }
         }
 
-        let output_idx = match self
-            .outputs
-            .iter()
-            .position(|o| o.layer_surface.as_ref() == Some(layer))
-        {
+        let output_idx = match self.outputs.iter().position(|o| &o.layer_surface == layer) {
             Some(i) => i,
             None => {
                 warn!("configure: no matching output for layer surface");
@@ -512,12 +464,8 @@ impl LayerShellHandler for App {
             }
         };
 
-        if w > 0 {
-            self.outputs[output_idx].width = w;
-        }
-        if h > 0 {
-            self.outputs[output_idx].height = h;
-        }
+        self.outputs[output_idx].width = w;
+        self.outputs[output_idx].height = h;
         self.outputs[output_idx].configured = true;
 
         let output_name = self.outputs[output_idx].name.clone();
@@ -640,6 +588,10 @@ impl LayerShellHandler for App {
                 );
             }
         }
+
+        // Draw now rather than waiting for the next cursor movement, so a
+        // newly plugged in or resized output never shows a blank or stale frame.
+        self.needs_render = true;
     }
 }
 
@@ -709,12 +661,7 @@ impl PointerHandler for App {
             // pull out everything we need as owned/Copy data so we drop
             // the immutable borrow on self.outputs before any mutation.
             let output_info = self.outputs.iter().find_map(|o| {
-                let matches = o
-                    .layer_surface
-                    .as_ref()
-                    .map(|ls| ls.wl_surface() == &event.surface)
-                    .unwrap_or(false);
-                if matches {
+                if o.layer_surface.wl_surface() == &event.surface {
                     Some((o.name.clone(), o.width as f32, o.height as f32))
                 } else {
                     None

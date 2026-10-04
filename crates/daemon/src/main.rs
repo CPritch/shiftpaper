@@ -51,9 +51,8 @@ fn main() -> Result<()> {
     let qh = event_queue.handle();
     let mut app = wayland::App::new(cfg.clone(), &globals, &qh)?;
 
-    event_queue.roundtrip(&mut app)?;
-    event_queue.roundtrip(&mut app)?;
-    app.ensure_layer_surfaces(&qh);
+    // First roundtrip delivers output info, and new_output creates a layer
+    // surface for each. Second delivers the compositor's configure for them.
     event_queue.roundtrip(&mut app)?;
     event_queue.roundtrip(&mut app)?;
 
@@ -63,7 +62,6 @@ fn main() -> Result<()> {
             error!(
                 idx = i,
                 name = o.name,
-                has_layer = o.layer_surface.is_some(),
                 configured = o.configured,
                 "output state"
             );
