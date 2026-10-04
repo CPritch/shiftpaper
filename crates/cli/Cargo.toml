@@ -32,3 +32,5 @@ toml_edit = "0.22"
 directories = "5"
 ureq = "3"
 indicatif = "0.17"
+[dev-dependencies]
+tempfile = "3"

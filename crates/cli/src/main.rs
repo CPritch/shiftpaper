@@ -6,7 +6,7 @@ mod fetch_model;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, value};
+use toml_edit::value;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -240,19 +240,7 @@ fn mode_cmd(mode: Option<TrackingMode>) -> Result<()> {
 }
 
 fn read_tracking_mode() -> Result<Option<String>> {
-    let path = config::config_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
+    let doc = config::read_document()?;
     Ok(doc
         .get("daemon")
         .and_then(|d| d.get("tracking_mode"))
@@ -261,89 +249,22 @@ fn read_tracking_mode() -> Result<Option<String>> {
 }
 
 fn update_tracking_mode(mode: TrackingMode) -> Result<()> {
-    let path = config::config_path();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(path = %path.display(), "config not found, creating");
-            String::new()
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let mut doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    ensure_table(&mut doc, "daemon");
-    let daemon = doc["daemon"]
-        .as_table_mut()
-        .context("config [daemon] is not a table")?;
-    daemon["tracking_mode"] = value(mode.as_str());
-
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    info!(path = %path.display(), "daemon config updated");
-    Ok(())
+    config::edit(|doc| {
+        config::table(doc, "daemon")?["tracking_mode"] = value(mode.as_str());
+        Ok(())
+    })
 }
 
 fn update_daemon_config(paths: &cache::BakedPaths, model: &Path) -> Result<()> {
-    let path = config::config_path();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(path = %path.display(), "config not found, creating");
-            String::new()
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let mut doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    ensure_table(&mut doc, "inference");
-    let inference = doc["inference"]
-        .as_table_mut()
-        .context("config [inference] is not a table")?;
-    inference["model_path"] = value(model.to_string_lossy().into_owned());
-
-    ensure_table(&mut doc, "wallpaper");
-    let wallpaper = doc["wallpaper"]
-        .as_table_mut()
-        .context("config [wallpaper] is not a table")?;
-    wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
-    wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
-    wallpaper.remove("path"); // legacy field from pre-workspace schema
-
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    info!(path = %path.display(), "daemon config updated");
-    Ok(())
-}
-
-fn ensure_table(doc: &mut DocumentMut, key: &str) {
-    if doc.get(key).is_none() {
-        doc.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
-    }
+    config::edit(|doc| {
+        config::table(doc, "inference")?["model_path"] =
+            value(model.to_string_lossy().into_owned());
+        let wallpaper = config::table(doc, "wallpaper")?;
+        wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
+        wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
+        wallpaper.remove("path"); // legacy field from pre-workspace schema
+        Ok(())
+    })
 }
 
 fn fetch_model_cmd(url: Option<&str>, force: bool) -> Result<()> {

@@ -1683,6 +1683,7 @@ dependencies = [
  "indicatif",
  "ort",
  "serde",
+ "tempfile",
  "toml",
  "toml_edit",
  "tracing",
