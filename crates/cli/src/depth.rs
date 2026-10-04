@@ -105,18 +105,15 @@ fn check_onnxruntime_loads() -> Result<()> {
     Ok(())
 }
 
-/// Load the model, preferring a GPU: CUDA for NVIDIA, MIGraphX for AMD.
-/// Providers missing from the installed onnxruntime are skipped, and ort
-/// falls back to the CPU on its own.
+/// Load the model, preferring CUDA. If CUDA isn't available, ort logs it
+/// and falls back to the CPU on its own. AMD's MIGraphX provider isn't
+/// used: as of MIGraphX 7.2 it aborts while compiling Depth Anything.
 fn load_session(model_path: &Path) -> Result<Session> {
     Session::builder()
         .map_err(|e| anyhow::anyhow!("failed to create ONNX session builder: {e}"))?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
-        .with_execution_providers([
-            ort::ep::CUDA::default().build(),
-            ort::ep::MIGraphX::default().build(),
-        ])
+        .with_execution_providers([ort::ep::CUDA::default().build()])
         .map_err(|e| anyhow::anyhow!("failed to set execution providers: {e}"))?
         .commit_from_file(model_path)
         .map_err(|e| {
