@@ -21,6 +21,10 @@ const PATCH: u32 = 14;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
+/// MoGe resizes to its own token grid internally (about 1064 px wide for a
+/// 16:10 image), so a larger input only costs time.
+const MOGE_MAX_SIDE: u32 = 1536;
+
 /// Run depth estimation on an already-loaded RGBA image.
 /// Returns a normalized [0, 1] depth map at the source image's resolution
 /// where 1.0 = closest to the camera.
@@ -30,26 +34,51 @@ pub fn estimate(rgba: &RgbaImage, model_path: &Path) -> Result<DepthMap> {
     check_onnxruntime_loads()?;
     let mut session = load_session(model_path)?;
     let model = ModelInput::read(&session)?;
+    info!(w = orig_w, h = orig_h, family = ?model.family, "running depth estimation");
+
+    let prediction = match model.family {
+        Family::MoGe2 => run_moge(&mut session, rgba)?,
+        Family::DepthAnythingV2 | Family::DepthAnythingV3 => {
+            run_depth_anything(&mut session, &model, rgba)?
+        }
+    };
+    let map =
+        ImageBuffer::<Luma<f32>, _>::from_raw(prediction.width, prediction.height, prediction.data)
+            .context("model output doesn't match its shape")?;
+
+    Ok(DepthMap {
+        data: imageops::resize(&map, orig_w, orig_h, FilterType::Triangle).into_raw(),
+        width: orig_w,
+        height: orig_h,
+    })
+}
+
+/// Normalized disparity at the model's output resolution.
+struct Prediction {
+    data: Vec<f32>,
+    width: u32,
+    height: u32,
+}
+
+fn run_depth_anything(
+    session: &mut Session,
+    model: &ModelInput,
+    rgba: &RgbaImage,
+) -> Result<Prediction> {
     let (in_w, in_h) = model
         .fixed_size
-        .unwrap_or_else(|| input_size(orig_w, orig_h));
-    info!(
-        w = orig_w,
-        h = orig_h,
-        in_w,
-        in_h,
-        "running depth estimation"
-    );
-    debug!(rank = model.rank, "model input");
+        .unwrap_or_else(|| input_size(rgba.width(), rgba.height()));
+    debug!(in_w, in_h, "model input size");
 
     let resized = imageops::resize(rgba, in_w, in_h, FilterType::Lanczos3);
     let (w, h) = (i64::from(in_w), i64::from(in_h));
-    let shape = if model.rank == 5 {
+    let shape = if model.family == Family::DepthAnythingV3 {
         vec![1, 1, 3, h, w]
     } else {
         vec![1, 3, h, w]
     };
-    let tensor = Tensor::from_array((shape, to_input_tensor(&resized).into_boxed_slice()))
+    let pixels = to_input_tensor(&resized, MEAN, STD);
+    let tensor = Tensor::from_array((shape, pixels.into_boxed_slice()))
         .map_err(|e| anyhow::anyhow!("failed to create input tensor: {e}"))?;
 
     let outputs = session
@@ -63,15 +92,59 @@ pub fn estimate(rgba: &RgbaImage, model_path: &Path) -> Result<DepthMap> {
     let [.., out_h, out_w] = **out_shape else {
         anyhow::bail!("unexpected output shape {:?}", &**out_shape);
     };
-    // V2 predicts inverse depth (higher is nearer); V3 predicts direct depth.
-    let depth = normalize_depth(raw, model.rank == 5);
-    let map = ImageBuffer::<Luma<f32>, _>::from_raw(out_w as u32, out_h as u32, depth)
-        .with_context(|| format!("output shape {:?} doesn't match its data", &**out_shape))?;
+    let output = if model.family == Family::DepthAnythingV3 {
+        Output::Depth
+    } else {
+        Output::Disparity
+    };
+    Ok(Prediction {
+        data: normalize_depth(raw, output),
+        width: out_w as u32,
+        height: out_h as u32,
+    })
+}
 
-    Ok(DepthMap {
-        data: imageops::resize(&map, orig_w, orig_h, FilterType::Triangle).into_raw(),
-        width: orig_w,
-        height: orig_h,
+fn run_moge(session: &mut Session, rgba: &RgbaImage) -> Result<Prediction> {
+    let scale = (MOGE_MAX_SIDE as f32 / rgba.width().max(rgba.height()) as f32).min(1.0);
+    let in_w = (rgba.width() as f32 * scale).round() as u32;
+    let in_h = (rgba.height() as f32 * scale).round() as u32;
+    debug!(
+        in_w,
+        in_h,
+        tokens = crate::moge::NUM_TOKENS,
+        "model input size"
+    );
+
+    let resized = imageops::resize(rgba, in_w, in_h, FilterType::Lanczos3);
+    // MoGe normalizes internally, so it takes plain [0, 1] RGB.
+    let pixels = to_input_tensor(&resized, [0.0; 3], [1.0; 3]);
+    let image = Tensor::from_array((
+        vec![1, 3, i64::from(in_h), i64::from(in_w)],
+        pixels.into_boxed_slice(),
+    ))
+    .map_err(|e| anyhow::anyhow!("failed to create image tensor: {e}"))?;
+    // A scalar: an empty shape with one value.
+    let tokens = Tensor::from_array((Vec::<i64>::new(), vec![crate::moge::NUM_TOKENS]))
+        .map_err(|e| anyhow::anyhow!("failed to create token count tensor: {e}"))?;
+
+    let outputs = session
+        .run(ort::inputs!["image" => image, "num_tokens" => tokens])
+        .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
+    let (points_shape, points) = outputs["points"]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| anyhow::anyhow!("failed to extract points: {e}"))?;
+    let (_, mask) = outputs["mask"]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| anyhow::anyhow!("failed to extract mask: {e}"))?;
+
+    let [_, out_h, out_w, 3] = **points_shape else {
+        anyhow::bail!("unexpected points shape {:?}", &**points_shape);
+    };
+    let depth = crate::moge::depth_from_points(points, mask, out_w as usize, out_h as usize);
+    Ok(Prediction {
+        data: normalize_depth(&depth, Output::Depth),
+        width: out_w as u32,
+        height: out_h as u32,
     })
 }
 
@@ -124,34 +197,47 @@ fn load_session(model_path: &Path) -> Result<Session> {
         })
 }
 
+/// The kinds of model we know how to run, recognised from their inputs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Family {
+    /// One 4-D image input, disparity out: Depth Anything V2 and models
+    /// exported the same way.
+    DepthAnythingV2,
+    /// One 5-D input ([batch, views, C, H, W]), distance out.
+    DepthAnythingV3,
+    /// An image and a token count in, a 3D point per pixel out.
+    MoGe2,
+}
+
 /// What the model expects as input, read from its metadata.
 struct ModelInput {
-    /// 5 for Depth Anything V3 ([batch, views, C, H, W]), 4 for V2.
-    rank: usize,
+    family: Family,
     /// Width and height, if the model was exported with a fixed size.
     fixed_size: Option<(u32, u32)>,
 }
 
 impl ModelInput {
     fn read(session: &Session) -> Result<Self> {
-        let dims: &[i64] = session
-            .inputs()
+        let inputs = session.inputs();
+        let dims: &[i64] = inputs
             .first()
             .and_then(|input| input.dtype().tensor_shape())
             .context("model has no tensor input")?;
         let [.., h, w] = *dims else {
             anyhow::bail!("unsupported model input shape {dims:?}");
         };
-        anyhow::ensure!(
-            matches!(dims.len(), 4 | 5),
-            "unsupported model input shape {dims:?}"
-        );
+        let family = if inputs.iter().any(|input| input.name() == "num_tokens") {
+            Family::MoGe2
+        } else {
+            match dims.len() {
+                4 => Family::DepthAnythingV2,
+                5 => Family::DepthAnythingV3,
+                _ => anyhow::bail!("unsupported model input shape {dims:?}"),
+            }
+        };
         // Dynamic dimensions are reported as -1.
         let fixed_size = (h > 0 && w > 0).then_some((w as u32, h as u32));
-        Ok(Self {
-            rank: dims.len(),
-            fixed_size,
-        })
+        Ok(Self { family, fixed_size })
     }
 }
 
@@ -167,32 +253,42 @@ fn input_size(width: u32, height: u32) -> (u32, u32) {
     (fit(width), fit(height))
 }
 
-/// The image as separate R, G and B planes with ImageNet normalization,
-/// which is the layout the model expects.
-fn to_input_tensor(image: &RgbaImage) -> Vec<f32> {
+/// The image as separate R, G and B planes, scaled to [0, 1] and then
+/// normalized with `mean` and `std`, which is the layout the models expect.
+fn to_input_tensor(image: &RgbaImage, mean: [f32; 3], std: [f32; 3]) -> Vec<f32> {
     let n = image.pixels().len();
     let mut out = vec![0.0f32; 3 * n];
     for (i, px) in image.pixels().enumerate() {
         for c in 0..3 {
-            out[c * n + i] = (px[c] as f32 / 255.0 - MEAN[c]) / STD[c];
+            out[c * n + i] = (px[c] as f32 / 255.0 - mean[c]) / std[c];
         }
     }
     out
 }
 
-/// Rescale raw model output to [0, 1], flipping it if `invert` so that 1.0
-/// is always nearest the camera.
-fn normalize_depth(raw: &[f32], invert: bool) -> Vec<f32> {
-    let (min, max) = raw
+/// What a model's output values mean.
+#[derive(Clone, Copy)]
+enum Output {
+    /// Higher is nearer, already proportional to parallax (Depth Anything V2).
+    Disparity,
+    /// Distance from the camera (Depth Anything V3, MoGe-2).
+    Depth,
+}
+
+/// Rescale raw model output to [0, 1] disparity, with 1.0 nearest the
+/// camera. Depth is converted to disparity first, because parallax shift is
+/// proportional to 1 / distance; flipping depth linearly squashes the
+/// foreground together.
+fn normalize_depth(raw: &[f32], output: Output) -> Vec<f32> {
+    let disparity: Vec<f32> = match output {
+        Output::Disparity => raw.to_vec(),
+        Output::Depth => raw.iter().map(|&v| 1.0 / v.max(1e-6)).collect(),
+    };
+    let (min, max) = disparity
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     let range = (max - min).max(1e-6);
-    raw.iter()
-        .map(|&v| {
-            let t = (v - min) / range;
-            if invert { 1.0 - t } else { t }
-        })
-        .collect()
+    disparity.iter().map(|&v| (v - min) / range).collect()
 }
 
 #[cfg(test)]
@@ -215,7 +311,7 @@ mod tests {
     #[test]
     fn input_tensor_is_planar() {
         let image = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
-        let tensor = to_input_tensor(&image);
+        let tensor = to_input_tensor(&image, MEAN, STD);
         let red = (1.0 - MEAN[0]) / STD[0];
         let green = (1.0 - MEAN[1]) / STD[1];
         // [R plane, G plane, B plane], each two pixels long.
@@ -224,13 +320,25 @@ mod tests {
     }
 
     #[test]
-    fn depth_is_normalized_and_optionally_inverted() {
-        assert_eq!(normalize_depth(&[2.0, 4.0, 6.0], false), [0.0, 0.5, 1.0]);
-        assert_eq!(normalize_depth(&[2.0, 4.0, 6.0], true), [1.0, 0.5, 0.0]);
+    fn disparity_is_normalized() {
+        assert_eq!(
+            normalize_depth(&[2.0, 4.0, 6.0], Output::Disparity),
+            [0.0, 0.5, 1.0]
+        );
+    }
+
+    #[test]
+    fn depth_becomes_disparity() {
+        // Distances 1, 2 and 4 are disparities 1, 0.5 and 0.25.
+        let d = normalize_depth(&[1.0, 2.0, 4.0], Output::Depth);
+        assert_eq!(d[0], 1.0);
+        assert!((d[1] - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(d[2], 0.0);
     }
 
     #[test]
     fn flat_depth_does_not_divide_by_zero() {
-        assert_eq!(normalize_depth(&[3.0, 3.0], false), [0.0, 0.0]);
+        assert_eq!(normalize_depth(&[3.0, 3.0], Output::Disparity), [0.0, 0.0]);
+        assert_eq!(normalize_depth(&[0.0, 0.0], Output::Depth), [0.0, 0.0]);
     }
 }

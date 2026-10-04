@@ -14,7 +14,7 @@ Parallax wallpaper daemon for Wayland. Uses monocular depth estimation to genera
 
 Two binaries:
 
-- `shiftpaper` (CLI) takes a source image, runs Depth Anything V2/V3 inference via ONNX Runtime, and writes a color + 16-bit depth PNG pair to a cache directory.
+- `shiftpaper` (CLI) takes a source image, runs a monocular depth model (MoGe-2 by default) via ONNX Runtime, and writes a color + 16-bit depth PNG pair to a cache directory.
 - `shiftpaperd` (daemon) loads the pre-baked pair and renders a parallax-displaced wallpaper on wlr-layer-shell surfaces using wgpu/Vulkan.
 
 The daemon has no ML dependencies. All inference happens in the CLI.
@@ -47,12 +47,14 @@ cargo install --path crates/daemon
 ## Quick start
 
 ```
-shiftpaper fetch-model                      # downloads the depth model (~99 MB)
+shiftpaper fetch-model                      # downloads the depth model (~420 MB)
 shiftpaper set ~/Pictures/wallpaper.jpg
 systemctl --user enable --now shiftpaperd
 ```
 
 To change wallpaper, `shiftpaper set` another image and run `systemctl --user reload shiftpaperd`.
+
+`shiftpaper fetch-model --list` shows the other depth models. Their licences are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 From a source install, run `shiftpaperd` directly, or copy `shiftpaperd.service` into `~/.config/systemd/user/` and point its `ExecStart` at your binary.
 

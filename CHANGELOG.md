@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- MoGe-2 depth models, with MoGe-2 ViT-B as the new default. Existing installs keep their current model until you run `shiftpaper fetch-model`.
+- `shiftpaper fetch-model --list` shows the downloadable models, and `fetch-model <name>` gets a specific one. The licence is shown before downloading.
+- Depth Anything V3 Small and Base can be downloaded.
+- THIRD_PARTY.md lists each model's licence.
+
+### Changed
+
+- `fetch-model --url` is gone. Use `--model` with any ONNX file instead.
+- Wallpapers are re-baked once, because the cache now keys bakes by model.
+
+### Fixed
+
+- Depth Anything V3 output was flipped instead of converted to disparity, which flattened the foreground and pulled the sky forward.
+- Baking the same image with a different model reused the first model's depth map.
+
 ## 0.2.0 - 2026-10-04
 
 ### Added
