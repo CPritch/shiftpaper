@@ -1,80 +1,43 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Smoothed cursor state with configurable poll rate.
-pub struct CursorPoller {
+/// Reads the global cursor position over Hyprland's IPC socket.
+pub struct HyprlandCursor {
     socket_path: PathBuf,
-    poll_interval: Duration,
-    last_poll: Instant,
-    /// Raw absolute cursor position from Hyprland.
-    pub raw_x: f32,
-    pub raw_y: f32,
-    /// Smoothed cursor offset normalized to [-0.5, 0.5] per-monitor.
-    pub offset_x: f32,
-    pub offset_y: f32,
-    /// Whether the cursor moved since last poll.
-    pub changed: bool,
 }
 
-impl CursorPoller {
-    pub fn new(poll_hz: u32) -> Option<Self> {
-        let socket_path = hyprland_socket_path()?;
+impl HyprlandCursor {
+    /// None when not running under Hyprland.
+    pub fn new() -> Option<Self> {
         Some(Self {
-            socket_path,
-            poll_interval: Duration::from_secs_f64(1.0 / poll_hz as f64),
-            last_poll: Instant::now() - Duration::from_secs(1), // force immediate first poll
-            raw_x: 0.0,
-            raw_y: 0.0,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            changed: false,
+            socket_path: hyprland_socket_path()?,
         })
     }
 
-    /// Poll Hyprland for cursor position if enough time has elapsed.
-    /// `monitor_x`, `monitor_y` are the monitor's top-left in global coords.
-    /// `monitor_w`, `monitor_h` are the monitor's dimensions.
-    /// Returns true if cursor moved.
-    pub fn poll(
-        &mut self,
-        monitor_x: f32,
-        monitor_y: f32,
-        monitor_w: f32,
-        monitor_h: f32,
-        smoothing: f32,
-    ) -> bool {
-        if self.last_poll.elapsed() < self.poll_interval {
-            return false;
-        }
-        self.last_poll = Instant::now();
+    /// Cursor position in global logical coordinates, the same space as
+    /// output positions.
+    pub fn position(&self) -> Option<(f32, f32)> {
+        let mut stream = UnixStream::connect(&self.socket_path).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .ok()?;
+        stream.write_all(b"cursorpos").ok()?;
 
-        let (x, y) = match query_cursor_pos(&self.socket_path) {
-            Some(pos) => pos,
-            None => return false,
-        };
-
-        self.raw_x = x;
-        self.raw_y = y;
-
-        // Normalize cursor position relative to monitor center → [-0.5, 0.5]
-        let target_x = (x - monitor_x) / monitor_w - 0.5;
-        let target_y = (y - monitor_y) / monitor_h - 0.5;
-
-        let prev_x = self.offset_x;
-        let prev_y = self.offset_y;
-
-        // Lerp for smooth movement
-        self.offset_x += (target_x - self.offset_x) * smoothing;
-        self.offset_y += (target_y - self.offset_y) * smoothing;
-
-        // Consider "changed" if offset moved by more than a tiny epsilon
-        self.changed =
-            (self.offset_x - prev_x).abs() > 1e-5 || (self.offset_y - prev_y).abs() > 1e-5;
-
-        self.changed
+        let mut buf = [0u8; 64];
+        let n = stream.read(&mut buf).ok()?;
+        parse_cursor_pos(std::str::from_utf8(&buf[..n]).ok()?)
     }
+}
+
+/// Where `cursor` sits relative to the centre of an output at (x, y) with
+/// size (w, h), as a fraction of that size in [-0.5, 0.5]. Outputs the
+/// cursor isn't on clamp to their nearest edge, so they lean towards it.
+pub fn offset_from_centre(cursor: (f32, f32), x: i32, y: i32, w: u32, h: u32) -> (f32, f32) {
+    let ox = ((cursor.0 - x as f32) / w as f32 - 0.5).clamp(-0.5, 0.5);
+    let oy = ((cursor.1 - y as f32) / h as f32 - 0.5).clamp(-0.5, 0.5);
+    (ox, oy)
 }
 
 fn hyprland_socket_path() -> Option<PathBuf> {
@@ -92,20 +55,47 @@ fn hyprland_socket_path() -> Option<PathBuf> {
     }
 }
 
-fn query_cursor_pos(socket_path: &PathBuf) -> Option<(f32, f32)> {
-    let mut stream = UnixStream::connect(socket_path).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .ok()?;
-    stream.write_all(b"cursorpos").ok()?;
+/// Parse Hyprland's `cursorpos` response, e.g. "1234, 567".
+fn parse_cursor_pos(response: &str) -> Option<(f32, f32)> {
+    let (x, y) = response.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
 
-    let mut buf = [0u8; 64];
-    let n = stream.read(&mut buf).ok()?;
-    let response = std::str::from_utf8(&buf[..n]).ok()?.trim();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Response format: "X, Y"
-    let mut parts = response.split(',');
-    let x: f32 = parts.next()?.trim().parse().ok()?;
-    let y: f32 = parts.next()?.trim().parse().ok()?;
-    Some((x, y))
+    // Layout from a real setup: laptop eDP-1 at (1600, 400) sized
+    // 1600x1000 logical, external HDMI-A-1 at (3200, 0) sized 2560x1440.
+
+    #[test]
+    fn cursor_at_output_centre_is_zero() {
+        assert_eq!(
+            offset_from_centre((4480.0, 720.0), 3200, 0, 2560, 1440),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            offset_from_centre((2400.0, 900.0), 1600, 400, 1600, 1000),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn other_outputs_lean_towards_cursor() {
+        // Cursor centred on the laptop, which is left of the external.
+        assert_eq!(
+            offset_from_centre((2400.0, 900.0), 3200, 0, 2560, 1440),
+            (-0.5, 0.125)
+        );
+    }
+
+    #[test]
+    fn parses_cursor_position() {
+        assert_eq!(parse_cursor_pos("1234, 567\n"), Some((1234.0, 567.0)));
+    }
+
+    #[test]
+    fn rejects_malformed_response() {
+        assert_eq!(parse_cursor_pos("unknown request"), None);
+    }
 }

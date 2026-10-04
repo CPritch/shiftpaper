@@ -14,10 +14,10 @@ pub struct OutputRenderState {
 }
 
 impl OutputRenderState {
-    /// Step the lerp toward target_offset and write the new uniform value.
-    /// Step factor 0.3 matches hyprland mode smoothing — small enough to
-    /// look smooth, advances per pointer event so it tracks input rate.
-    pub fn step_and_write(&mut self, queue: &wgpu::Queue, intensity: f32) {
+    /// Step the lerp 30% of the way toward target_offset and write the new
+    /// uniform value. Returns whether the offset moved, so callers can skip
+    /// redrawing once it has settled.
+    pub fn step_and_write(&mut self, queue: &wgpu::Queue, intensity: f32) -> bool {
         let (tx, ty) = self.target_offset;
         let (cx, cy) = self.current_offset;
         let nx = cx + (tx - cx) * 0.3;
@@ -25,13 +25,7 @@ impl OutputRenderState {
         self.current_offset = (nx, ny);
         let data = [nx, ny, intensity, 0.0f32];
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&data));
-    }
-
-    /// Write uniforms directly without lerping. Used by hyprland mode
-    /// where cursor.rs already smooths.
-    pub fn write_uniforms_direct(&self, queue: &wgpu::Queue, x: f32, y: f32, intensity: f32) {
-        let data = [x, y, intensity, 0.0f32];
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&data));
+        (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5
     }
 }
 

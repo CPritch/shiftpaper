@@ -3,7 +3,7 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm,
-    output::{OutputHandler, OutputState},
+    output::{OutputHandler, OutputInfo as SctkOutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -30,7 +30,7 @@ use wayland_client::{
 };
 
 use crate::config::{Config, TrackingMode};
-use crate::cursor::CursorPoller;
+use crate::cursor::HyprlandCursor;
 use crate::renderer::{OutputRenderState, Renderer};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -39,11 +39,23 @@ use raw_window_handle::{
 pub struct OutputInfo {
     pub name: String,
     pub wl_output: wl_output::WlOutput,
+    /// Position in global logical coordinates.
+    pub x: i32,
+    pub y: i32,
+    /// Surface size in logical pixels, from the layer surface configure.
     pub width: u32,
     pub height: u32,
     pub scale: i32,
-    pub layer_surface: Option<LayerSurface>,
+    pub layer_surface: LayerSurface,
     pub configured: bool,
+}
+
+impl OutputInfo {
+    fn refresh(&mut self, info: &SctkOutputInfo) {
+        self.name = info.name.clone().unwrap_or_default();
+        (self.x, self.y) = info.logical_position.unwrap_or(info.location);
+        self.scale = info.scale_factor;
+    }
 }
 
 pub struct App {
@@ -57,10 +69,9 @@ pub struct App {
     pub outputs: Vec<OutputInfo>,
     pub renderer: Option<Renderer>,
     pub render_targets: HashMap<String, OutputRenderState>,
-    pub cursor: Option<CursorPoller>,
+    pub cursor: Option<HyprlandCursor>,
     pub pointer: Option<wl_pointer::WlPointer>,
     pub seat: Option<wl_seat::WlSeat>,
-    pub pointer_active_output: Option<String>,
     pub idle: Option<crate::idle::IdleState>,
     pub battery_ok: bool,
     /// Set by gate transitions (idle resume, battery resume) to request
@@ -101,7 +112,6 @@ impl App {
             cursor: None,
             pointer: None,
             seat: None,
-            pointer_active_output: None,
             idle: None,
             battery_ok: true,
             needs_render: false,
@@ -134,7 +144,7 @@ impl App {
     /// bind groups for every output. Tracking mode and idle timeout
     /// changes require a full restart.
     pub fn reload_config(&mut self) {
-        let new_cfg = match crate::config::Config::load() {
+        let mut new_cfg = match crate::config::Config::load() {
             Ok(c) => c,
             Err(e) => {
                 warn!("SIGHUP reload failed: {e:#}");
@@ -143,10 +153,13 @@ impl App {
         };
 
         if new_cfg.daemon.tracking_mode != self.config.daemon.tracking_mode {
-            warn!("tracking_mode changed — restart required to take effect");
+            warn!("tracking_mode changed, restart required to take effect");
+            // pointer_frame reads the mode at runtime, but the hyprland
+            // timer is only set up at startup. Keep running in the old mode.
+            new_cfg.daemon.tracking_mode = self.config.daemon.tracking_mode;
         }
         if new_cfg.daemon.idle_timeout_secs != self.config.daemon.idle_timeout_secs {
-            warn!("idle_timeout_secs changed — restart required to take effect");
+            warn!("idle_timeout_secs changed, restart required to take effect");
         }
 
         let renderer = match &self.renderer {
@@ -199,86 +212,62 @@ impl App {
         info!("config reloaded via SIGHUP");
     }
 
-    pub fn init_cursor(&mut self, poll_hz: u32) {
-        match CursorPoller::new(poll_hz) {
-            Some(c) => {
-                info!(hz = poll_hz, "cursor polling initialized");
-                self.cursor = Some(c);
-            }
-            None => {
-                warn!("failed to initialize cursor poller — parallax disabled");
-            }
+    pub fn init_cursor(&mut self) {
+        self.cursor = HyprlandCursor::new();
+        if self.cursor.is_none() {
+            warn!("Hyprland IPC unavailable, parallax disabled");
         }
     }
 
-    /// Hyprland-mode tick: poll the IPC cursor and render every output.
+    /// Hyprland-mode tick: read the global cursor position, step each
+    /// output's offset towards it, and redraw only the outputs that moved.
     /// Not called in pointer mode (the timer source is not inserted).
     pub fn tick(&mut self, qh: &QueueHandle<Self>) {
-        if let (Some(cursor), Some(renderer)) = (&mut self.cursor, &self.renderer)
-            && let Some(output) = self.outputs.first()
-        {
-            let moved = cursor.poll(0.0, 0.0, output.width as f32, output.height as f32, 0.3);
+        if !self.render_allowed() {
+            return;
+        }
+        let (Some(cursor), Some(renderer)) = (&self.cursor, &self.renderer) else {
+            return;
+        };
+        let Some(pos) = cursor.position() else {
+            return;
+        };
 
-            if moved {
-                // Write the same value to every output's uniform buffer.
-                // cursor.rs already smooths so we skip the per-output lerp.
-                for o in &self.outputs {
-                    let intensity = self.config.intensity_for(&o.name);
-                    if let Some(rt) = self.render_targets.get(&o.name) {
-                        rt.write_uniforms_direct(
-                            &renderer.queue,
-                            cursor.offset_x,
-                            cursor.offset_y,
-                            intensity,
-                        );
-                    }
-                }
+        for o in &self.outputs {
+            if !o.configured {
+                continue;
+            }
+            let Some(rt) = self.render_targets.get_mut(&o.name) else {
+                continue;
+            };
+            rt.target_offset = crate::cursor::offset_from_centre(pos, o.x, o.y, o.width, o.height);
+            if rt.step_and_write(&renderer.queue, self.config.intensity_for(&o.name)) {
+                let surface = o.layer_surface.wl_surface();
+                surface.frame(qh, surface.clone());
+                renderer.render_frame(rt);
             }
         }
-
-        self.render_all(qh);
     }
 
-    pub fn ensure_layer_surfaces(&mut self, qh: &QueueHandle<Self>) {
-        for o in &mut self.outputs {
-            if o.name.is_empty()
-                && let Some(info) = self.output_state.info(&o.wl_output)
-            {
-                o.name = info.name.clone().unwrap_or_default();
-                if let Some(mode) = info.modes.iter().find(|m| m.current) {
-                    o.width = mode.dimensions.0 as u32;
-                    o.height = mode.dimensions.1 as u32;
-                }
-                o.scale = info.scale_factor;
-                debug!(
-                    name = o.name,
-                    w = o.width,
-                    h = o.height,
-                    scale = o.scale,
-                    "filled output info from OutputState"
-                );
-            }
-
-            if !o.name.is_empty() && o.layer_surface.is_none() {
-                let surface = self.compositor_state.create_surface(qh);
-                let layer_surface = self.layer_shell.create_layer_surface(
-                    qh,
-                    surface,
-                    Layer::Background,
-                    Some("shiftpaper"),
-                    Some(&o.wl_output),
-                );
-
-                layer_surface.set_anchor(Anchor::all());
-                layer_surface.set_exclusive_zone(-1);
-                layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-                layer_surface.set_size(0, 0);
-                layer_surface.commit();
-
-                info!(name = o.name, "created layer surface for output");
-                o.layer_surface = Some(layer_surface);
-            }
-        }
+    fn create_layer_surface(
+        &self,
+        qh: &QueueHandle<Self>,
+        output: &wl_output::WlOutput,
+    ) -> LayerSurface {
+        let surface = self.compositor_state.create_surface(qh);
+        let layer_surface = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Background,
+            Some("shiftpaper"),
+            Some(output),
+        );
+        layer_surface.set_anchor(Anchor::all());
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_size(0, 0);
+        layer_surface.commit();
+        layer_surface
     }
 
     pub fn render_all(&self, qh: &QueueHandle<Self>) {
@@ -296,9 +285,8 @@ impl App {
             }
 
             if let Some(render_state) = self.render_targets.get(&output.name) {
-                if let Some(layer) = &output.layer_surface {
-                    layer.wl_surface().frame(qh, layer.wl_surface().clone());
-                }
+                let surface = output.layer_surface.wl_surface();
+                surface.frame(qh, surface.clone());
                 renderer.render_frame(render_state);
             }
         }
@@ -322,9 +310,8 @@ impl App {
             return;
         }
         if let Some(rt) = self.render_targets.get(output_name) {
-            if let Some(layer) = &output.layer_surface {
-                layer.wl_surface().frame(qh, layer.wl_surface().clone());
-            }
+            let surface = output.layer_surface.wl_surface();
+            surface.frame(qh, surface.clone());
             renderer.render_frame(rt);
         }
     }
@@ -383,79 +370,44 @@ impl OutputHandler for App {
         &mut self.output_state
     }
 
+    /// Called once the output's info is complete, both at startup and
+    /// when a monitor is plugged in.
     fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        debug!("new_output: output added, waiting for info");
-        self.outputs.push(OutputInfo {
-            name: String::new(),
-            wl_output: output,
-            width: 1920,
-            height: 1080,
-            scale: 1,
-            layer_surface: None,
-            configured: false,
-        });
-    }
-
-    fn update_output(
         &mut self,
         _conn: &Connection,
         qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        let info = match self.output_state.info(&output) {
-            Some(i) => i,
-            None => {
-                debug!("update_output: no info available yet");
-                return;
-            }
+        let mut o = OutputInfo {
+            name: String::new(),
+            wl_output: output.clone(),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            scale: 1,
+            layer_surface: self.create_layer_surface(qh, &output),
+            configured: false,
         };
-
-        let o = match self.outputs.iter_mut().find(|o| o.wl_output == output) {
-            Some(o) => o,
-            None => {
-                warn!("update_output: unknown output");
-                return;
-            }
-        };
-
-        o.name = info.name.clone().unwrap_or_default();
-        if let Some(mode) = info.modes.iter().find(|m| m.current) {
-            o.width = mode.dimensions.0 as u32;
-            o.height = mode.dimensions.1 as u32;
+        if let Some(info) = self.output_state.info(&output) {
+            o.refresh(&info);
         }
-        o.scale = info.scale_factor;
+        info!(name = o.name, "created layer surface for output");
+        self.outputs.push(o);
+    }
 
-        debug!(
-            name = o.name,
-            w = o.width,
-            h = o.height,
-            scale = o.scale,
-            "update_output"
-        );
-
-        if o.layer_surface.is_none() {
-            let surface = self.compositor_state.create_surface(qh);
-            let layer_surface = self.layer_shell.create_layer_surface(
-                qh,
-                surface,
-                Layer::Background,
-                Some("shiftpaper"),
-                Some(&output),
-            );
-
-            layer_surface.set_anchor(Anchor::all());
-            layer_surface.set_exclusive_zone(-1);
-            layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-            layer_surface.set_size(0, 0);
-            layer_surface.commit();
-
-            o.layer_surface = Some(layer_surface);
-            info!(name = o.name, "created layer surface for output");
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        let Some(info) = self.output_state.info(&output) else {
+            return;
+        };
+        if let Some(o) = self.outputs.iter_mut().find(|o| o.wl_output == output) {
+            o.refresh(&info);
+            debug!(name = o.name, scale = o.scale, "output updated");
         }
     }
 
@@ -465,6 +417,8 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        // The wgpu surface holds a raw pointer to the wl_surface, so the
+        // render target must be dropped before the layer surface.
         if let Some(o) = self.outputs.iter().find(|o| o.wl_output == output) {
             info!(name = o.name, "output removed");
             self.render_targets.remove(&o.name);
@@ -488,6 +442,12 @@ impl LayerShellHandler for App {
     ) {
         let (w, h) = (configure.new_size.0, configure.new_size.1);
         debug!(w, h, "layer surface configured");
+        // We anchor to all four edges, so the protocol requires the
+        // compositor to choose a size. wgpu panics on a zero-sized surface.
+        if w == 0 || h == 0 {
+            warn!("configure: compositor sent a zero size, ignoring");
+            return;
+        }
 
         if self.renderer.is_none() {
             info!("initializing wgpu renderer...");
@@ -500,11 +460,7 @@ impl LayerShellHandler for App {
             }
         }
 
-        let output_idx = match self
-            .outputs
-            .iter()
-            .position(|o| o.layer_surface.as_ref() == Some(layer))
-        {
+        let output_idx = match self.outputs.iter().position(|o| &o.layer_surface == layer) {
             Some(i) => i,
             None => {
                 warn!("configure: no matching output for layer surface");
@@ -512,12 +468,8 @@ impl LayerShellHandler for App {
             }
         };
 
-        if w > 0 {
-            self.outputs[output_idx].width = w;
-        }
-        if h > 0 {
-            self.outputs[output_idx].height = h;
-        }
+        self.outputs[output_idx].width = w;
+        self.outputs[output_idx].height = h;
         self.outputs[output_idx].configured = true;
 
         let output_name = self.outputs[output_idx].name.clone();
@@ -640,6 +592,10 @@ impl LayerShellHandler for App {
                 );
             }
         }
+
+        // Draw now rather than waiting for the next cursor movement, so a
+        // newly plugged in or resized output never shows a blank or stale frame.
+        self.needs_render = true;
     }
 }
 
@@ -679,11 +635,10 @@ impl SeatHandler for App {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
-            self.pointer_active_output = None;
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
 
@@ -705,50 +660,29 @@ impl PointerHandler for App {
         }
 
         for event in events {
-            // Match the event surface to one of our layer surfaces, and
-            // pull out everything we need as owned/Copy data so we drop
-            // the immutable borrow on self.outputs before any mutation.
-            let output_info = self.outputs.iter().find_map(|o| {
-                let matches = o
-                    .layer_surface
-                    .as_ref()
-                    .map(|ls| ls.wl_surface() == &event.surface)
-                    .unwrap_or(false);
-                if matches {
-                    Some((o.name.clone(), o.width as f32, o.height as f32))
-                } else {
-                    None
-                }
-            });
-
-            let (output_name, output_w, output_h) = match output_info {
-                Some(t) => t,
-                None => continue,
+            let Some(o) = self
+                .outputs
+                .iter()
+                .find(|o| o.layer_surface.wl_surface() == &event.surface)
+            else {
+                continue;
             };
 
             match event.kind {
-                PointerEventKind::Enter { .. } => {
-                    debug!(name = %output_name, "pointer entered");
-                    self.pointer_active_output = Some(output_name);
-                }
-                PointerEventKind::Leave { .. } => {
-                    debug!(name = %output_name, "pointer left");
-                    if self.pointer_active_output.as_deref() == Some(output_name.as_str()) {
-                        self.pointer_active_output = None;
-                    }
-                }
+                PointerEventKind::Enter { .. } => debug!(name = o.name, "pointer entered"),
+                PointerEventKind::Leave { .. } => debug!(name = o.name, "pointer left"),
                 PointerEventKind::Motion { .. } => {
                     let (x, y) = event.position;
-                    let target_x = (x as f32 / output_w) - 0.5;
-                    let target_y = (y as f32 / output_h) - 0.5;
-                    let intensity = self.config.intensity_for(&output_name);
+                    let target_x = x as f32 / o.width as f32 - 0.5;
+                    let target_y = y as f32 / o.height as f32 - 0.5;
+                    let intensity = self.config.intensity_for(&o.name);
                     if let (Some(renderer), Some(rt)) =
-                        (&self.renderer, self.render_targets.get_mut(&output_name))
+                        (&self.renderer, self.render_targets.get_mut(&o.name))
                     {
                         rt.target_offset = (target_x, target_y);
                         rt.step_and_write(&renderer.queue, intensity);
                     }
-                    self.render_output(qh, &output_name);
+                    self.render_output(qh, &o.name);
                 }
                 _ => {}
             }
