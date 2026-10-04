@@ -1,6 +1,7 @@
 use crate::depth::{DepthMap, RANK_POINTS, load_depth_map};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
+use image::imageops::{self, FilterType};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -21,6 +22,10 @@ struct Uniforms {
     _pad: f32,
 }
 
+/// How far the shader zooms in on each side. Must match MARGIN in
+/// shader.wgsl.
+const MARGIN: f32 = 0.025;
+
 /// A wallpaper's images decoded into memory, ready to upload. Decoding is
 /// the slow part, so it can happen off the main thread.
 pub struct DecodedWallpaper {
@@ -33,17 +38,29 @@ pub struct DecodedWallpaper {
 }
 
 impl DecodedWallpaper {
-    pub fn load(color: &Path, depth: &Path) -> Result<Self> {
-        let color = image::open(color)
+    /// Load a baked wallpaper. If it's bigger than any of `screens` needs,
+    /// it's scaled down, which makes every frame cheaper to draw and
+    /// saves memory.
+    pub fn load(color: &Path, depth: &Path, screens: &[(u32, u32)]) -> Result<Self> {
+        let mut color = image::open(color)
             .with_context(|| format!("failed to load image: {}", color.display()))?
             .to_rgba8();
-        let depth = match load_depth_map(depth) {
+        let mut depth = match load_depth_map(depth) {
             Ok(map) => Some(map),
             Err(e) => {
                 warn!("using a flat depth map: {e:#}");
                 None
             }
         };
+        if let Some(scale) = fit_scale(color.dimensions(), screens) {
+            let (w, h) = scale_size(color.dimensions(), scale);
+            debug!(w, h, "scaling wallpaper down to fit the screens");
+            color = imageops::resize(&color, w, h, FilterType::Triangle);
+            depth = depth.map(|map| {
+                let (w, h) = scale_size((map.width, map.height), scale);
+                map.resized(w, h)
+            });
+        }
         // A flat wallpaper is all one depth, so it changes all at once,
         // halfway through a transition.
         let ranks = depth
@@ -55,6 +72,24 @@ impl DecodedWallpaper {
             ranks,
         })
     }
+}
+
+/// How much to shrink an image so it still covers each of `screens` once
+/// cropped to their shape, or None if it isn't bigger than they need.
+fn fit_scale((width, height): (u32, u32), screens: &[(u32, u32)]) -> Option<f32> {
+    let needed = screens
+        .iter()
+        .map(|&(w, h)| f32::max(w as f32 / width as f32, h as f32 / height as f32))
+        .fold(0.0, f32::max)
+        // The shader zooms in a little, which needs a little more detail.
+        / (1.0 - 2.0 * MARGIN);
+    (needed > 0.0 && needed < 1.0).then_some(needed)
+}
+
+/// `size` multiplied by `scale`, rounded up.
+fn scale_size((width, height): (u32, u32), scale: f32) -> (u32, u32) {
+    let scale = |n: u32| ((n as f32 * scale).ceil() as u32).max(1);
+    (scale(width), scale(height))
 }
 
 /// A wallpaper's textures on the GPU. Cloning shares the textures, so
@@ -413,9 +448,15 @@ impl Renderer {
             })
     }
 
-    /// Load a baked wallpaper from disk onto the GPU.
-    pub fn load_wallpaper(&self, color: &Path, depth: &Path) -> Result<Wallpaper> {
-        Ok(self.upload_wallpaper(&DecodedWallpaper::load(color, depth)?))
+    /// Load a baked wallpaper from disk onto the GPU, scaled down to fit
+    /// `screens` if it's bigger than they need.
+    pub fn load_wallpaper(
+        &self,
+        color: &Path,
+        depth: &Path,
+        screens: &[(u32, u32)],
+    ) -> Result<Wallpaper> {
+        Ok(self.upload_wallpaper(&DecodedWallpaper::load(color, depth, screens)?))
     }
 
     pub fn upload_wallpaper(&self, decoded: &DecodedWallpaper) -> Wallpaper {
@@ -697,6 +738,33 @@ mod tests {
     #[test]
     fn taller_image_is_cropped_vertically() {
         assert_close(cover_uv_scale((1000, 2000), (2000, 1000)), [1.0, 0.25]);
+    }
+
+    #[test]
+    fn margin_matches_the_shader() {
+        let line = format!("const MARGIN: f32 = {MARGIN};");
+        assert!(include_str!("shader.wgsl").contains(&line), "{line}");
+    }
+
+    #[test]
+    fn large_images_shrink_to_cover_the_largest_screen() {
+        // A 16:10 screen is wider than a 3:2 image, so width sets the size.
+        let scale = fit_scale((6000, 4000), &[(1920, 1080), (2560, 1600)]).unwrap();
+        assert!((scale - 2560.0 / 6000.0 / 0.95).abs() < 1e-6, "{scale}");
+    }
+
+    #[test]
+    fn rotated_screens_need_more_height() {
+        let landscape = fit_scale((6000, 4000), &[(2560, 1440)]).unwrap();
+        let portrait = fit_scale((6000, 4000), &[(1440, 2560)]).unwrap();
+        assert!(portrait > landscape);
+    }
+
+    #[test]
+    fn small_images_are_left_alone() {
+        assert_eq!(fit_scale((1920, 1080), &[(2560, 1440)]), None);
+        assert_eq!(fit_scale((2560, 1440), &[(2560, 1440)]), None);
+        assert_eq!(fit_scale((6000, 4000), &[]), None);
     }
 
     #[test]

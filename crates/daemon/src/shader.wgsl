@@ -45,7 +45,8 @@ struct Uniforms {
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
 // Zoom in 2.5% each side so displacement pulls in real pixels from beyond
-// the visible area instead of stretching the edges.
+// the visible area instead of stretching the edges. Must match MARGIN in
+// renderer.rs.
 const MARGIN: f32 = 0.025;
 // Half the width of the slice of depth ranks that is part way through
 // switching at any moment. Narrower gives a crisper wavefront, wider a

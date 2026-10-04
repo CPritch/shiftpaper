@@ -30,8 +30,8 @@ impl Slideshow {
 
     /// The slide to show now, loaded straight away if it isn't already, for
     /// an output that needs something to show. Skips slides that fail to
-    /// load.
-    pub fn current(&mut self, renderer: &Renderer) -> Option<Wallpaper> {
+    /// load. `screens` are the screen sizes to scale slides down to.
+    pub fn current(&mut self, renderer: &Renderer, screens: &[(u32, u32)]) -> Option<Wallpaper> {
         if self.wallpaper.is_none() {
             let len = self.config.images.len();
             let due = due_index(
@@ -41,7 +41,7 @@ impl Slideshow {
             );
             for index in (due..len).chain(0..due) {
                 let (color, depth) = self.config.slide(index);
-                match renderer.load_wallpaper(color, &depth) {
+                match renderer.load_wallpaper(color, &depth, screens) {
                     Ok(wallpaper) => {
                         info!(path = %color.display(), "slideshow started");
                         self.index = Some(index);
@@ -57,7 +57,7 @@ impl Slideshow {
 
     /// Check whether it's time for the next slide. Returns it once it's
     /// due and has finished loading in the background.
-    pub fn poll(&mut self, renderer: &Renderer) -> Option<Wallpaper> {
+    pub fn poll(&mut self, renderer: &Renderer, screens: &[(u32, u32)]) -> Option<Wallpaper> {
         let len = self.config.images.len();
         let due = due_index(
             SystemTime::now(),
@@ -76,7 +76,9 @@ impl Slideshow {
             _ => {
                 let (color, depth) = self.config.slide(due);
                 let color = color.to_path_buf();
-                let handle = std::thread::spawn(move || DecodedWallpaper::load(&color, &depth));
+                let screens = screens.to_vec();
+                let handle =
+                    std::thread::spawn(move || DecodedWallpaper::load(&color, &depth, &screens));
                 self.loading = Some((due, handle));
                 return None;
             }

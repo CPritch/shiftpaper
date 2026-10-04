@@ -233,14 +233,19 @@ impl App {
         };
 
         let (duration, near_first) = transition_settings(&new_cfg);
+        let screens = self.screen_sizes();
         for output in &self.outputs {
             if !output.configured {
                 continue;
             }
             if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let Some(wallpaper) =
-                    load_wallpaper_for(renderer, &new_cfg, self.slideshow.as_mut(), &output.name)
-                else {
+                let Some(wallpaper) = load_wallpaper_for(
+                    renderer,
+                    &new_cfg,
+                    self.slideshow.as_mut(),
+                    &output.name,
+                    &screens,
+                ) else {
                     continue;
                 };
                 rt.start_transition(renderer, wallpaper, duration, near_first);
@@ -259,10 +264,11 @@ impl App {
         if !self.render_allowed() {
             return;
         }
+        let screens = self.screen_sizes();
         let (Some(renderer), Some(slideshow)) = (&self.renderer, &mut self.slideshow) else {
             return;
         };
-        let Some(next) = slideshow.poll(renderer) else {
+        let Some(next) = slideshow.poll(renderer, &screens) else {
             return;
         };
 
@@ -277,6 +283,28 @@ impl App {
         for idx in 0..self.outputs.len() {
             self.advance(qh, idx);
         }
+    }
+
+    /// Each screen's size in pixels, so a wallpaper bigger than they need
+    /// can be scaled down as it loads.
+    fn screen_sizes(&self) -> Vec<(u32, u32)> {
+        self.output_state
+            .outputs()
+            .filter_map(|output| self.output_state.info(&output))
+            .filter_map(|info| {
+                let mode = info.modes.iter().find(|m| m.current)?;
+                let (w, h) = mode.dimensions;
+                let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+                // A rotated screen shows the image the other way round.
+                Some(match info.transform {
+                    wl_output::Transform::_90
+                    | wl_output::Transform::_270
+                    | wl_output::Transform::Flipped90
+                    | wl_output::Transform::Flipped270 => (h, w),
+                    _ => (w, h),
+                })
+            })
+            .collect()
     }
 
     pub fn init_cursor(&mut self) {
@@ -403,9 +431,10 @@ fn load_wallpaper_for(
     config: &Config,
     slideshow: Option<&mut Slideshow>,
     output_name: &str,
+    screens: &[(u32, u32)],
 ) -> Option<Wallpaper> {
     if config.in_slideshow(output_name) {
-        let wallpaper = slideshow?.current(renderer);
+        let wallpaper = slideshow?.current(renderer, screens);
         if wallpaper.is_none() {
             warn!(name = output_name, "none of the slideshow's images loaded");
         }
@@ -417,7 +446,7 @@ fn load_wallpaper_for(
         return None;
     };
     renderer
-        .load_wallpaper(color, &depth)
+        .load_wallpaper(color, &depth, screens)
         .inspect_err(|e| warn!(name = output_name, "{e:#}"))
         .ok()
 }
@@ -664,11 +693,13 @@ impl LayerShellHandler for App {
 
             surface.configure(&renderer.device, &surface_config);
 
+            let screens = self.screen_sizes();
             let Some(wallpaper) = load_wallpaper_for(
                 renderer,
                 &self.config,
                 self.slideshow.as_mut(),
                 &output_name,
+                &screens,
             ) else {
                 return;
             };

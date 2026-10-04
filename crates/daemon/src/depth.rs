@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use image::imageops::{self, FilterType};
 use std::path::Path;
 
 /// Depth map at the wallpaper's native resolution.
@@ -28,6 +29,18 @@ pub fn load_depth_map(path: &Path) -> Result<DepthMap> {
 pub const RANK_POINTS: usize = 257;
 
 impl DepthMap {
+    /// The map resized to `width` x `height`.
+    pub fn resized(self, width: u32, height: u32) -> Self {
+        let image =
+            image::ImageBuffer::<image::Luma<u16>, _>::from_raw(self.width, self.height, self.data)
+                .expect("a depth map's data matches its size");
+        Self {
+            data: imageops::resize(&image, width, height, FilterType::Triangle).into_raw(),
+            width,
+            height,
+        }
+    }
+
     /// The fraction of the map's pixels farther away than each of 257
     /// evenly spaced depths, from 0 (the farthest) to 1 (the nearest).
     /// Transitions sweep through this rank instead of raw depth, so they
