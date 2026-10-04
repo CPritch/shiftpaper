@@ -16,10 +16,19 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/shiftpaper-cache/wallpapers"))
 }
 
-/// Blake3 of the decoded RGBA bytes. Matches the key the daemon's old
-/// in-process cache used, so repeat bakes hit the same filenames.
+/// Bump when a change to baking alters its output, so images baked by an
+/// older version are baked again instead of reused from the cache.
+const BAKE_VERSION: &[u8] = b"2";
+
+/// Cache key for a source image: blake3 of the bake version and the
+/// decoded RGBA bytes.
 pub fn hash_source(rgba: &image::RgbaImage) -> String {
-    blake3::hash(rgba.as_raw()).to_hex().to_string()
+    blake3::Hasher::new()
+        .update(BAKE_VERSION)
+        .update(rgba.as_raw())
+        .finalize()
+        .to_hex()
+        .to_string()
 }
 
 /// Compute the color+depth paths for a given hash in a given directory.
