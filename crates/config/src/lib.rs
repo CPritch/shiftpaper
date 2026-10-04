@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +15,9 @@ pub struct Config {
     pub daemon: DaemonConfig,
     /// None until the first `shiftpaper set`.
     pub wallpaper: Option<WallpaperConfig>,
+    /// Takes the place of [wallpaper] on every monitor without a color of
+    /// its own.
+    pub slideshow: Option<SlideshowConfig>,
     #[serde(default)]
     pub monitor: Vec<MonitorOverride>,
     /// None until the first `shiftpaper fetch-model` or `set`.
@@ -28,6 +32,9 @@ pub struct DaemonConfig {
     pub idle_timeout_secs: u64,
     pub battery_threshold: u8,
     pub tracking_mode: TrackingMode,
+    pub transition: Transition,
+    /// How long a change of wallpaper takes. 0 switches straight away.
+    pub transition_secs: f32,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,11 +61,46 @@ impl TrackingMode {
     }
 }
 
+/// The order a change of wallpaper sweeps through the picture in, by depth.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transition {
+    /// The new wallpaper's nearest things appear first, in front of the
+    /// old one, and it fills in towards the distance.
+    #[default]
+    NearFirst,
+    /// The old wallpaper's background gives way to the new one first, and
+    /// its nearest things go last.
+    FarFirst,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WallpaperConfig {
     pub color: PathBuf,
     pub depth: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SlideshowConfig {
+    /// Baked color images, shown in turn. Each one's depth map is found
+    /// the same way as for a [wallpaper] without a depth.
+    pub images: Vec<PathBuf>,
+    #[serde(default = "default_interval")]
+    pub interval_secs: NonZeroU32,
+}
+
+fn default_interval() -> NonZeroU32 {
+    const { NonZeroU32::new(600).unwrap() }
+}
+
+impl SlideshowConfig {
+    /// The color and depth images of the `index`th slide.
+    pub fn slide(&self, index: usize) -> (&Path, PathBuf) {
+        let color = &self.images[index];
+        (color, infer_depth_path(color))
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -84,6 +126,8 @@ impl Default for DaemonConfig {
             idle_timeout_secs: 300,
             battery_threshold: 20,
             tracking_mode: TrackingMode::default(),
+            transition: Transition::default(),
+            transition_secs: 3.0,
         }
     }
 }
@@ -99,6 +143,8 @@ impl Config {
 
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        cfg.validate()
+            .with_context(|| format!("invalid {}", path.display()))?;
 
         if let Some(w) = &mut cfg.wallpaper {
             w.color = expand_tilde(&w.color);
@@ -117,17 +163,46 @@ impl Config {
         if let Some(i) = &mut cfg.inference {
             i.model_path = expand_tilde(&i.model_path);
         }
+        if let Some(s) = &mut cfg.slideshow {
+            for p in &mut s.images {
+                *p = expand_tilde(p);
+            }
+        }
 
         Ok(Some(cfg))
     }
 
+    /// Catch values that parse but make no sense.
+    fn validate(&self) -> Result<()> {
+        let secs = self.daemon.transition_secs;
+        anyhow::ensure!(
+            Duration::try_from_secs_f32(secs).is_ok(),
+            "transition_secs must be a number of seconds, 0 or more, not {secs}"
+        );
+        if let Some(s) = &self.slideshow {
+            anyhow::ensure!(!s.images.is_empty(), "[slideshow] has no images");
+        }
+        Ok(())
+    }
+
     /// True if at least one output has a color image to show.
     pub fn has_wallpaper(&self) -> bool {
-        self.wallpaper.is_some() || self.monitor.iter().any(|m| m.color.is_some())
+        self.wallpaper.is_some()
+            || self.slideshow.is_some()
+            || self.monitor.iter().any(|m| m.color.is_some())
     }
 
     fn override_for(&self, output_name: &str) -> Option<&MonitorOverride> {
         self.monitor.iter().find(|m| m.name == output_name)
+    }
+
+    /// True if the output shows the slideshow, rather than its own color
+    /// or the global wallpaper.
+    pub fn in_slideshow(&self, output_name: &str) -> bool {
+        let own_color = self
+            .override_for(output_name)
+            .is_some_and(|m| m.color.is_some());
+        self.slideshow.is_some() && !own_color
     }
 
     /// The output's own color image, else the global wallpaper's.
@@ -402,5 +477,89 @@ mod tests {
         );
         assert_eq!(cfg.intensity_for("DP-1"), 0.1);
         assert_eq!(cfg.intensity_for("eDP-1"), 0.05);
+    }
+
+    #[test]
+    fn transition_defaults_to_near_first() {
+        let cfg = parse("");
+        assert_eq!(cfg.daemon.transition, Transition::NearFirst);
+        assert_eq!(cfg.daemon.transition_secs, 3.0);
+        let cfg = parse("[daemon]\ntransition = \"far-first\"");
+        assert_eq!(cfg.daemon.transition, Transition::FarFirst);
+    }
+
+    #[test]
+    fn unusable_transition_times_are_rejected() {
+        for secs in ["-1.0", "nan", "inf", "1e30"] {
+            let cfg = parse(&format!("[daemon]\ntransition_secs = {secs}"));
+            assert!(cfg.validate().is_err(), "{secs}");
+        }
+        assert!(parse("[daemon]\ntransition_secs = 0.0").validate().is_ok());
+    }
+
+    #[test]
+    fn transition_time_can_be_a_whole_number() {
+        assert_eq!(
+            parse("[daemon]\ntransition_secs = 5")
+                .daemon
+                .transition_secs,
+            5.0
+        );
+    }
+
+    #[test]
+    fn slideshow_needs_images() {
+        let cfg = parse("[slideshow]\nimages = []");
+        assert!(cfg.validate().is_err());
+        assert!(toml::from_str::<Config>("[slideshow]\ninterval_secs = 60").is_err());
+    }
+
+    #[test]
+    fn slideshow_interval_has_a_default_and_cannot_be_zero() {
+        let cfg = parse("[slideshow]\nimages = [\"/a.color.png\"]");
+        assert_eq!(cfg.slideshow.unwrap().interval_secs.get(), 600);
+        assert!(
+            toml::from_str::<Config>("[slideshow]\nimages = [\"/a.png\"]\ninterval_secs = 0")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn slides_infer_their_depth() {
+        let cfg = parse("[slideshow]\nimages = [\"/a.color.png\", \"/b.jpg\"]");
+        let slideshow = cfg.slideshow.unwrap();
+        assert_eq!(
+            slideshow.slide(0),
+            (Path::new("/a.color.png"), PathBuf::from("/a.depth16.png"))
+        );
+        assert_eq!(slideshow.slide(1).1, PathBuf::from("/b.depth16.png"));
+    }
+
+    #[test]
+    fn monitors_with_their_own_color_skip_the_slideshow() {
+        let cfg = parse(
+            r#"
+            [slideshow]
+            images = ["/a.color.png"]
+
+            [[monitor]]
+            name = "DP-1"
+            color = "/mine.png"
+
+            [[monitor]]
+            name = "eDP-1"
+            parallax_intensity = 0.1
+            "#,
+        );
+        assert!(cfg.has_wallpaper());
+        assert!(!cfg.in_slideshow("DP-1"));
+        assert!(cfg.in_slideshow("eDP-1"));
+        assert!(cfg.in_slideshow("HDMI-A-1"));
+    }
+
+    #[test]
+    fn no_slideshow_by_default() {
+        let cfg = parse("[wallpaper]\ncolor = \"/a.png\"");
+        assert!(!cfg.in_slideshow("DP-1"));
     }
 }
