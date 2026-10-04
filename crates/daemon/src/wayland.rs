@@ -588,7 +588,7 @@ impl LayerShellHandler for App {
                 WaylandWindowHandle::new(NonNull::new(surface_ptr).expect("null surface ptr"));
 
             let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: RawDisplayHandle::Wayland(display_handle),
+                raw_display_handle: Some(RawDisplayHandle::Wayland(display_handle)),
                 raw_window_handle: RawWindowHandle::Wayland(window_handle),
             };
 
@@ -619,6 +619,7 @@ impl LayerShellHandler for App {
                 alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             };
 
             surface.configure(&renderer.device, &surface_config);

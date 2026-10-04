@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use std::path::Path;
 use tracing::{debug, info};
+use wgpu::CurrentSurfaceTexture;
 use wgpu::util::DeviceExt;
 
 /// Mirrors `Uniforms` in shader.wgsl. `repr(C)` fixes the field order and
@@ -77,14 +78,13 @@ impl Renderer {
     pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: None,
-                force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
             .context("no suitable GPU adapter found")?;
@@ -92,15 +92,12 @@ impl Renderer {
         info!(name = adapter.get_info().name, "using GPU");
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("shiftpaper"),
-                    required_features: wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("shiftpaper"),
+                required_features: wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await
             .context("failed to create device")?;
 
@@ -148,8 +145,8 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shiftpaper_pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -182,7 +179,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -245,14 +242,14 @@ impl Renderer {
         });
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             bytemuck::cast_slice(&depth.data),
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(2 * depth.width),
                 rows_per_image: Some(depth.height),
@@ -325,14 +322,14 @@ impl Renderer {
         });
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &img,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * w),
                 rows_per_image: Some(h),
@@ -346,15 +343,22 @@ impl Renderer {
         ))
     }
 
+    /// Draw and present one frame. Returns false if nothing was presented,
+    /// so the caller can retry on the next frame callback.
     pub fn render_frame(&self, output: &OutputRenderState) -> bool {
         let frame = match output.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            // A suboptimal frame is still usable, and our size only changes on
+            // a compositor configure, which reconfigures the surface anyway.
+            CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
+                frame
+            }
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return false,
+            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 output.surface.configure(&self.device, &output.config);
                 return false;
             }
-            Err(e) => {
-                tracing::warn!("surface error: {e}");
+            CurrentSurfaceTexture::Validation => {
+                tracing::warn!("surface validation error while acquiring a frame");
                 return false;
             }
         };
@@ -374,6 +378,7 @@ impl Renderer {
                 label: Some("shiftpaper_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -390,7 +395,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
         true
     }
 }
@@ -412,14 +417,14 @@ fn create_placeholder_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu:
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &[0u8; 2],
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(2),
             rows_per_image: Some(1),
