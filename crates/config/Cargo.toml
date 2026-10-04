@@ -1,0 +1,16 @@
+[package]
+name = "shiftpaper-config"
+description = "config.toml schema shared by the shiftpaper CLI and daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Lets the CLI take TrackingMode directly as a command-line argument.
+clap = ["dep:clap"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"
+clap = { version = "4", features = ["derive"], optional = true }

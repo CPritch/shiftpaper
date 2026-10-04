@@ -35,10 +35,12 @@ jobs:
 
       - name: cargo clippy
         run: |
+          cargo clippy -p shiftpaper-config --all-targets --all-features -- -D warnings
           cargo clippy -p shiftpaper-cli --all-targets --no-default-features --features load-dynamic -- -D warnings
           cargo clippy -p shiftpaper-daemon --all-targets -- -D warnings
 
       - name: cargo test
         run: |
+          cargo test -p shiftpaper-config
           cargo test -p shiftpaper-cli --no-default-features --features load-dynamic
           cargo test -p shiftpaper-daemon

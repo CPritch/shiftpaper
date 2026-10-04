@@ -1,6 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use image::imageops::{self, FilterType};
+use image::{ImageBuffer, Luma, RgbaImage};
+use ort::session::Session;
+use ort::value::Tensor;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub struct DepthMap {
     pub data: Vec<f32>,
@@ -8,7 +12,10 @@ pub struct DepthMap {
     pub height: u32,
 }
 
-const MODEL_INPUT_SIZE: u32 = 518;
+/// Depth Anything's preferred length for the image's shorter side.
+const SHORT_SIDE: u32 = 518;
+/// The model's patch size. Input sides must be a multiple of it.
+const PATCH: u32 = 14;
 
 // ImageNet normalization constants used by Depth Anything V2/V3
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -17,183 +24,180 @@ const STD: [f32; 3] = [0.229, 0.224, 0.225];
 /// Run depth estimation on an already-loaded RGBA image.
 /// Returns a normalized [0, 1] depth map at the source image's resolution
 /// where 1.0 = closest to the camera.
-pub fn estimate(rgba: &image::RgbaImage, model_path: &Path) -> Result<DepthMap> {
+pub fn estimate(rgba: &RgbaImage, model_path: &Path) -> Result<DepthMap> {
     let (orig_w, orig_h) = rgba.dimensions();
-
-    info!(w = orig_w, h = orig_h, "running depth estimation");
-
-    let resized = image::imageops::resize(
-        rgba,
-        MODEL_INPUT_SIZE,
-        MODEL_INPUT_SIZE,
-        image::imageops::FilterType::Lanczos3,
+    let mut session = load_session(model_path)?;
+    let model = ModelInput::read(&session)?;
+    let (in_w, in_h) = model
+        .fixed_size
+        .unwrap_or_else(|| input_size(orig_w, orig_h));
+    info!(
+        w = orig_w,
+        h = orig_h,
+        in_w,
+        in_h,
+        "running depth estimation"
     );
+    debug!(rank = model.rank, "model input");
 
-    let npixels = (MODEL_INPUT_SIZE * MODEL_INPUT_SIZE) as usize;
-    let mut input_data = vec![0.0f32; 3 * npixels];
-    for y in 0..MODEL_INPUT_SIZE {
-        for x in 0..MODEL_INPUT_SIZE {
-            let pixel = resized.get_pixel(x, y);
-            let idx = (y * MODEL_INPUT_SIZE + x) as usize;
-            input_data[idx] = (pixel[0] as f32 / 255.0 - MEAN[0]) / STD[0];
-            input_data[npixels + idx] = (pixel[1] as f32 / 255.0 - MEAN[1]) / STD[1];
-            input_data[2 * npixels + idx] = (pixel[2] as f32 / 255.0 - MEAN[2]) / STD[2];
-        }
-    }
-
-    let raw_depth = run_inference(model_path, &input_data)?;
-
-    // Normalize to [0, 1] with 1.0 = closest.
-    // DA2 outputs inverse depth (higher = closer) — already correct.
-    // DA3 outputs direct depth (higher = farther) — needs inversion.
-    let (d_min, d_max) = raw_depth
-        .data
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
-    let range = (d_max - d_min).max(1e-6);
-
-    let normalized: Vec<f32> = if raw_depth.invert {
-        raw_depth
-            .data
-            .iter()
-            .map(|&v| 1.0 - (v - d_min) / range)
-            .collect()
+    let resized = imageops::resize(rgba, in_w, in_h, FilterType::Lanczos3);
+    let (w, h) = (i64::from(in_w), i64::from(in_h));
+    let shape = if model.rank == 5 {
+        vec![1, 1, 3, h, w]
     } else {
-        raw_depth
-            .data
-            .iter()
-            .map(|&v| (v - d_min) / range)
-            .collect()
+        vec![1, 3, h, w]
     };
+    let tensor = Tensor::from_array((shape, to_input_tensor(&resized).into_boxed_slice()))
+        .map_err(|e| anyhow::anyhow!("failed to create input tensor: {e}"))?;
 
-    let data = resize_depth(
-        &normalized,
-        MODEL_INPUT_SIZE,
-        MODEL_INPUT_SIZE,
-        orig_w,
-        orig_h,
-    );
+    let outputs = session
+        .run(ort::inputs![tensor])
+        .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
+    let (out_shape, raw) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| anyhow::anyhow!("failed to extract output: {e}"))?;
+
+    // The output ends in [height, width], whatever leading dimensions it has.
+    let [.., out_h, out_w] = **out_shape else {
+        anyhow::bail!("unexpected output shape {:?}", &**out_shape);
+    };
+    // V2 predicts inverse depth (higher is nearer); V3 predicts direct depth.
+    let depth = normalize_depth(raw, model.rank == 5);
+    let map = ImageBuffer::<Luma<f32>, _>::from_raw(out_w as u32, out_h as u32, depth)
+        .with_context(|| format!("output shape {:?} doesn't match its data", &**out_shape))?;
 
     Ok(DepthMap {
-        data,
+        data: imageops::resize(&map, orig_w, orig_h, FilterType::Triangle).into_raw(),
         width: orig_w,
         height: orig_h,
     })
 }
 
-struct InferenceResult {
-    data: Vec<f32>,
-    /// True if output is direct depth (DA3), false if inverse depth (DA2).
-    invert: bool,
-}
-
-fn run_inference(model_path: &Path, input: &[f32]) -> Result<InferenceResult> {
-    match build_session(model_path, true).and_then(|s| run_with_session(s, input)) {
-        Ok(r) => Ok(r),
-        Err(cuda_err) => {
-            warn!("CUDA inference failed ({cuda_err:#}), falling back to CPU");
-            let session = build_session(model_path, false)?;
-            run_with_session(session, input)
-        }
-    }
-}
-
-fn build_session(model_path: &Path, use_cuda: bool) -> Result<ort::session::Session> {
-    let mut builder = ort::session::Session::builder()
+/// Load the model, preferring CUDA. If CUDA isn't available, ort logs it
+/// and falls back to the CPU on its own.
+fn load_session(model_path: &Path) -> Result<Session> {
+    Session::builder()
         .map_err(|e| anyhow::anyhow!("failed to create ONNX session builder: {e}"))?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?;
-
-    if use_cuda {
-        builder = builder
-            .with_execution_providers([ort::ep::CUDA::default().build()])
-            .map_err(|e| anyhow::anyhow!("failed to set CUDA execution provider: {e}"))?;
-    }
-
-    builder.commit_from_file(model_path).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to load ONNX model from {}: {e}",
-            model_path.display()
-        )
-    })
+        .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
+        .with_execution_providers([ort::ep::CUDA::default().build()])
+        .map_err(|e| anyhow::anyhow!("failed to set execution providers: {e}"))?
+        .commit_from_file(model_path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to load ONNX model from {}: {e}",
+                model_path.display()
+            )
+        })
 }
 
-fn run_with_session(mut session: ort::session::Session, input: &[f32]) -> Result<InferenceResult> {
-    let sz = MODEL_INPUT_SIZE as i64;
+/// What the model expects as input, read from its metadata.
+struct ModelInput {
+    /// 5 for Depth Anything V3 ([batch, views, C, H, W]), 4 for V2.
+    rank: usize,
+    /// Width and height, if the model was exported with a fixed size.
+    fixed_size: Option<(u32, u32)>,
+}
 
-    // Try DA3 (rank 5: [batch, views, C, H, W]) first, fall back to DA2 (rank 4).
-    let result: Result<InferenceResult> = {
-        let data: Box<[f32]> = input.to_vec().into_boxed_slice();
-        let tensor = ort::value::Tensor::<f32>::from_array((vec![1i64, 1, 3, sz, sz], data))
-            .map_err(|e| anyhow::anyhow!("failed to create input tensor: {e}"))?;
-        match session.run(ort::inputs![tensor]) {
-            Ok(outputs) => {
-                debug!("inference succeeded with rank-5 input (DA3)");
-                let (_shape, d) = outputs[0]
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| anyhow::anyhow!("failed to extract output: {e}"))?;
-                Ok(InferenceResult {
-                    data: d.to_vec(),
-                    invert: true,
-                })
-            }
-            Err(_) => {
-                debug!("rank-5 failed, retrying with rank-4 input (DA2)");
-                Err(anyhow::anyhow!("rank-5 failed"))
-            }
-        }
+impl ModelInput {
+    fn read(session: &Session) -> Result<Self> {
+        let dims: &[i64] = session
+            .inputs()
+            .first()
+            .and_then(|input| input.dtype().tensor_shape())
+            .context("model has no tensor input")?;
+        let [.., h, w] = *dims else {
+            anyhow::bail!("unsupported model input shape {dims:?}");
+        };
+        anyhow::ensure!(
+            matches!(dims.len(), 4 | 5),
+            "unsupported model input shape {dims:?}"
+        );
+        // Dynamic dimensions are reported as -1.
+        let fixed_size = (h > 0 && w > 0).then_some((w as u32, h as u32));
+        Ok(Self {
+            rank: dims.len(),
+            fixed_size,
+        })
+    }
+}
+
+/// Model input size for an image: the shorter side scaled to 518 and both
+/// sides rounded to a multiple of 14, keeping the aspect ratio. This
+/// matches Depth Anything's own preprocessing.
+fn input_size(width: u32, height: u32) -> (u32, u32) {
+    let scale = SHORT_SIDE as f32 / width.min(height) as f32;
+    let fit = |side: u32| {
+        let patches = (side as f32 * scale / PATCH as f32).round() as u32;
+        (patches * PATCH).max(SHORT_SIDE)
     };
-
-    if let Ok(data) = result {
-        return Ok(data);
-    }
-
-    let data: Box<[f32]> = input.to_vec().into_boxed_slice();
-    let tensor = ort::value::Tensor::<f32>::from_array((vec![1i64, 3, sz, sz], data))
-        .map_err(|e| anyhow::anyhow!("failed to create input tensor: {e}"))?;
-    let outputs = session
-        .run(ort::inputs![tensor])
-        .map_err(|e| anyhow::anyhow!("inference failed with both rank-5 and rank-4: {e}"))?;
-
-    let (_shape, data) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow::anyhow!("failed to extract output: {e}"))?;
-
-    Ok(InferenceResult {
-        data: data.to_vec(),
-        invert: false,
-    })
+    (fit(width), fit(height))
 }
 
-fn resize_depth(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<f32> {
-    let mut dst = vec![0.0f32; (dst_w * dst_h) as usize];
-
-    for dy in 0..dst_h {
-        for dx in 0..dst_w {
-            let sx = (dx as f32 + 0.5) * (src_w as f32 / dst_w as f32) - 0.5;
-            let sy = (dy as f32 + 0.5) * (src_h as f32 / dst_h as f32) - 0.5;
-
-            let x0 = sx.floor().max(0.0) as u32;
-            let y0 = sy.floor().max(0.0) as u32;
-            let x1 = (x0 + 1).min(src_w - 1);
-            let y1 = (y0 + 1).min(src_h - 1);
-
-            let fx = sx - x0 as f32;
-            let fy = sy - y0 as f32;
-
-            let v00 = src[(y0 * src_w + x0) as usize];
-            let v10 = src[(y0 * src_w + x1) as usize];
-            let v01 = src[(y1 * src_w + x0) as usize];
-            let v11 = src[(y1 * src_w + x1) as usize];
-
-            let v = v00 * (1.0 - fx) * (1.0 - fy)
-                + v10 * fx * (1.0 - fy)
-                + v01 * (1.0 - fx) * fy
-                + v11 * fx * fy;
-
-            dst[(dy * dst_w + dx) as usize] = v;
+/// The image as separate R, G and B planes with ImageNet normalization,
+/// which is the layout the model expects.
+fn to_input_tensor(image: &RgbaImage) -> Vec<f32> {
+    let n = image.pixels().len();
+    let mut out = vec![0.0f32; 3 * n];
+    for (i, px) in image.pixels().enumerate() {
+        for c in 0..3 {
+            out[c * n + i] = (px[c] as f32 / 255.0 - MEAN[c]) / STD[c];
         }
     }
+    out
+}
 
-    dst
+/// Rescale raw model output to [0, 1], flipping it if `invert` so that 1.0
+/// is always nearest the camera.
+fn normalize_depth(raw: &[f32], invert: bool) -> Vec<f32> {
+    let (min, max) = raw
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let range = (max - min).max(1e-6);
+    raw.iter()
+        .map(|&v| {
+            let t = (v - min) / range;
+            if invert { 1.0 - t } else { t }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_keeps_aspect_ratio() {
+        assert_eq!(input_size(1875, 1116), (868, 518));
+        assert_eq!(input_size(2560, 1440), (924, 518));
+        assert_eq!(input_size(1440, 2560), (518, 924));
+    }
+
+    #[test]
+    fn input_is_at_least_518_on_each_side() {
+        assert_eq!(input_size(1000, 1000), (518, 518));
+        assert_eq!(input_size(400, 300), (686, 518));
+    }
+
+    #[test]
+    fn input_tensor_is_planar() {
+        let image = RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        let tensor = to_input_tensor(&image);
+        let red = (1.0 - MEAN[0]) / STD[0];
+        let green = (1.0 - MEAN[1]) / STD[1];
+        // [R plane, G plane, B plane], each two pixels long.
+        assert_eq!(tensor[0], red);
+        assert_eq!(tensor[3], green);
+    }
+
+    #[test]
+    fn depth_is_normalized_and_optionally_inverted() {
+        assert_eq!(normalize_depth(&[2.0, 4.0, 6.0], false), [0.0, 0.5, 1.0]);
+        assert_eq!(normalize_depth(&[2.0, 4.0, 6.0], true), [1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn flat_depth_does_not_divide_by_zero() {
+        assert_eq!(normalize_depth(&[3.0, 3.0], false), [0.0, 0.0]);
+    }
 }

@@ -36,12 +36,12 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::config::{Config, TrackingMode};
 use crate::cursor::HyprlandCursor;
 use crate::renderer::{OutputRenderState, Renderer};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
+use shiftpaper_config::{Config, TrackingMode};
 
 pub struct OutputInfo {
     pub name: String,
@@ -201,7 +201,7 @@ impl App {
     /// bind groups for every output. Tracking mode and idle timeout
     /// changes require a full restart.
     pub fn reload_config(&mut self) {
-        let mut new_cfg = match crate::config::Config::load() {
+        let mut new_cfg = match crate::config::load() {
             Ok(c) => c,
             Err(e) => {
                 warn!("SIGHUP reload failed: {e:#}");
@@ -232,10 +232,18 @@ impl App {
                 continue;
             }
             if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let color_path = new_cfg.color_for(&output.name).to_path_buf();
-                let depth_path = new_cfg.depth_for(&output.name);
+                let (Some(color_path), Some(depth_path)) = (
+                    new_cfg.color_for(&output.name),
+                    new_cfg.depth_for(&output.name),
+                ) else {
+                    warn!(
+                        name = output.name,
+                        "reload: no wallpaper set for this output"
+                    );
+                    continue;
+                };
 
-                let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
+                let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(name = output.name, "reload: failed to load color: {e:#}");
@@ -615,10 +623,15 @@ impl LayerShellHandler for App {
 
             surface.configure(&renderer.device, &surface_config);
 
-            let color_path = self.config.color_for(&output_name).to_path_buf();
-            let depth_path = self.config.depth_for(&output_name);
+            let (Some(color_path), Some(depth_path)) = (
+                self.config.color_for(&output_name),
+                self.config.depth_for(&output_name),
+            ) else {
+                warn!(name = output_name, "no wallpaper set for this output");
+                return;
+            };
 
-            let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
+            let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("failed to load color texture: {e:#}");

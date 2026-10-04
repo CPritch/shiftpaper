@@ -4,9 +4,10 @@ mod depth;
 mod fetch_model;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use shiftpaper_config::{Config, TrackingMode};
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, value};
+use toml_edit::value;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -99,32 +100,14 @@ enum Command {
     },
 }
 
-/// Cursor tracking mode. Mirrors `crate::config::TrackingMode` in the
-/// daemon — kept here as a separate enum so the CLI can write the
-/// string value via toml_edit without depending on the daemon crate.
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum TrackingMode {
-    /// Wayland-native pointer events. Default. Works on any
-    /// wlr-layer-shell compositor.
-    Pointer,
-    /// Hyprland IPC global cursor polling. Hyprland-only.
-    Hyprland,
-}
-
-impl TrackingMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pointer => "pointer",
-            Self::Hyprland => "hyprland",
-        }
-    }
-}
-
 fn main() -> Result<()> {
+    // Logs go to stderr so stdout stays clean for the paths `bake` prints.
+    // Log targets are named after the crate, which is the binary's name.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("shiftpaper_cli=info")),
+                .unwrap_or_else(|_| EnvFilter::new(concat!(env!("CARGO_CRATE_NAME"), "=warn"))),
         )
         .init();
 
@@ -153,7 +136,7 @@ fn resolve_model(arg: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(p);
     }
     // 2. [inference] model_path in config.toml
-    if let Some(cfg) = config::try_load()?
+    if let Some(cfg) = Config::load()?
         && let Some(inference) = cfg.inference
     {
         let p = inference.model_path;
@@ -229,121 +212,31 @@ fn mode_cmd(mode: Option<TrackingMode>) -> Result<()> {
             eprintln!("  systemctl --user restart shiftpaperd");
         }
         None => {
-            let current = read_tracking_mode()?;
-            match current.as_deref() {
-                Some(m) => println!("{m}"),
-                None => println!("pointer"),
-            }
+            let mode = Config::load()?
+                .map(|cfg| cfg.daemon.tracking_mode)
+                .unwrap_or_default();
+            println!("{}", mode.as_str());
         }
     }
     Ok(())
-}
-
-fn read_tracking_mode() -> Result<Option<String>> {
-    let path = config::config_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    Ok(doc
-        .get("daemon")
-        .and_then(|d| d.get("tracking_mode"))
-        .and_then(|m| m.as_str())
-        .map(String::from))
 }
 
 fn update_tracking_mode(mode: TrackingMode) -> Result<()> {
-    let path = config::config_path();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(path = %path.display(), "config not found, creating");
-            String::new()
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let mut doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    ensure_table(&mut doc, "daemon");
-    let daemon = doc["daemon"]
-        .as_table_mut()
-        .context("config [daemon] is not a table")?;
-    daemon["tracking_mode"] = value(mode.as_str());
-
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    info!(path = %path.display(), "daemon config updated");
-    Ok(())
+    config::edit(|doc| {
+        config::table(doc, "daemon")?["tracking_mode"] = value(mode.as_str());
+        Ok(())
+    })
 }
 
 fn update_daemon_config(paths: &cache::BakedPaths, model: &Path) -> Result<()> {
-    let path = config::config_path();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(path = %path.display(), "config not found, creating");
-            String::new()
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to read {}", path.display())));
-        }
-    };
-
-    let mut doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    ensure_table(&mut doc, "inference");
-    let inference = doc["inference"]
-        .as_table_mut()
-        .context("config [inference] is not a table")?;
-    inference["model_path"] = value(model.to_string_lossy().into_owned());
-
-    ensure_table(&mut doc, "wallpaper");
-    let wallpaper = doc["wallpaper"]
-        .as_table_mut()
-        .context("config [wallpaper] is not a table")?;
-    wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
-    wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
-    wallpaper.remove("path"); // legacy field from pre-workspace schema
-
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    info!(path = %path.display(), "daemon config updated");
-    Ok(())
-}
-
-fn ensure_table(doc: &mut DocumentMut, key: &str) {
-    if doc.get(key).is_none() {
-        doc.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
-    }
+    config::edit(|doc| {
+        config::table(doc, "inference")?["model_path"] =
+            value(model.to_string_lossy().into_owned());
+        let wallpaper = config::table(doc, "wallpaper")?;
+        wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
+        wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
+        Ok(())
+    })
 }
 
 fn fetch_model_cmd(url: Option<&str>, force: bool) -> Result<()> {

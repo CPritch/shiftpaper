@@ -8,6 +8,7 @@ mod wayland;
 
 use anyhow::{Context, Result};
 use calloop::timer::{TimeoutAction, Timer};
+use shiftpaper_config::TrackingMode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -28,10 +29,11 @@ extern "C" fn handle_reload(_: std::ffi::c_int) {
 }
 
 fn main() -> Result<()> {
+    // Log targets are named after the crate, which is the binary's name.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("shiftpaper_daemon=info")),
+                .unwrap_or_else(|_| EnvFilter::new(concat!(env!("CARGO_CRATE_NAME"), "=info"))),
         )
         .init();
 
@@ -39,7 +41,7 @@ fn main() -> Result<()> {
 
     install_signal_handlers();
 
-    let cfg = config::Config::load()?;
+    let cfg = config::load()?;
     info!(?cfg, "configuration loaded");
 
     let conn = Connection::connect_to_env().context("failed to connect to Wayland display")?;
@@ -85,11 +87,11 @@ fn main() -> Result<()> {
     app.refresh_battery();
 
     match cfg.daemon.tracking_mode {
-        config::TrackingMode::Hyprland => {
+        TrackingMode::Hyprland => {
             info!("tracking mode: hyprland (IPC polling)");
             app.init_cursor();
         }
-        config::TrackingMode::Pointer => {
+        TrackingMode::Pointer => {
             info!("tracking mode: pointer (Wayland-native, event-driven)");
         }
     }
@@ -102,7 +104,7 @@ fn main() -> Result<()> {
         .insert(loop_handle.clone())
         .map_err(|e| anyhow::anyhow!("failed to insert Wayland source: {e}"))?;
 
-    if matches!(cfg.daemon.tracking_mode, config::TrackingMode::Hyprland) {
+    if matches!(cfg.daemon.tracking_mode, TrackingMode::Hyprland) {
         let poll_interval = Duration::from_secs_f64(1.0 / cfg.daemon.cursor_poll_hz.get() as f64);
         let tick_timer = Timer::immediate();
         let qh_tick = qh.clone();
