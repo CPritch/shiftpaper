@@ -1,13 +1,27 @@
 use anyhow::{Context, Result};
+use bytemuck::Zeroable;
 use std::path::Path;
 use tracing::{debug, info};
 use wgpu::util::DeviceExt;
+
+/// Mirrors `Uniforms` in shader.wgsl. `repr(C)` fixes the field order and
+/// padding to match the shader, and `Pod` lets bytemuck view it as bytes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    cursor_offset: [f32; 2],
+    intensity: f32,
+    _pad: f32,
+    uv_scale: [f32; 2],
+}
 
 pub struct OutputRenderState {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     pub bind_group: wgpu::BindGroup,
     pub color_view: wgpu::TextureView,
+    /// Wallpaper size in pixels, for cropping to the screen's aspect ratio.
+    pub image_size: (u32, u32),
     pub uniform_buffer: wgpu::Buffer,
     pub current_offset: (f32, f32),
     pub target_offset: (f32, f32),
@@ -23,9 +37,27 @@ impl OutputRenderState {
         let nx = cx + (tx - cx) * 0.3;
         let ny = cy + (ty - cy) * 0.3;
         self.current_offset = (nx, ny);
-        let data = [nx, ny, intensity, 0.0f32];
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&data));
+        let uniforms = Uniforms {
+            cursor_offset: [nx, ny],
+            intensity,
+            _pad: 0.0,
+            uv_scale: cover_uv_scale(self.image_size, (self.config.width, self.config.height)),
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5
+    }
+}
+
+/// How much of the image to show on each axis so it fills a screen of a
+/// different aspect ratio without stretching. The overflowing axis gets a
+/// value below 1 and is cropped equally on both sides.
+fn cover_uv_scale(image: (u32, u32), screen: (u32, u32)) -> [f32; 2] {
+    let image_aspect = image.0 as f32 / image.1 as f32;
+    let screen_aspect = screen.0 as f32 / screen.1 as f32;
+    if image_aspect > screen_aspect {
+        [screen_aspect / image_aspect, 1.0]
+    } else {
+        [1.0, image_aspect / screen_aspect]
     }
 }
 
@@ -179,14 +211,14 @@ impl Renderer {
         })
     }
 
-    /// Create a fresh uniform buffer for an output. Called once per
-    /// output during layer surface configure.
+    /// Create a uniform buffer for an output. Called once per output during
+    /// layer surface configure, and filled in by `step_and_write` before
+    /// the first draw.
     pub fn create_uniform_buffer(&self) -> wgpu::Buffer {
-        let uniform_data = [0.0f32, 0.0, 0.025, 0.0];
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("uniforms"),
-                contents: bytemuck::cast_slice(&uniform_data),
+                contents: bytemuck::bytes_of(&Uniforms::zeroed()),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
     }
@@ -267,7 +299,8 @@ impl Renderer {
         })
     }
 
-    pub fn load_wallpaper_texture(&self, path: &Path) -> Result<wgpu::TextureView> {
+    /// Upload the wallpaper image. Returns its view and size in pixels.
+    pub fn load_wallpaper_texture(&self, path: &Path) -> Result<(wgpu::TextureView, (u32, u32))> {
         let img = image::open(path)
             .with_context(|| format!("failed to load image: {}", path.display()))?
             .to_rgba8();
@@ -307,7 +340,10 @@ impl Renderer {
             size,
         );
 
-        Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+        Ok((
+            texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            (w, h),
+        ))
     }
 
     pub fn render_frame(&self, output: &OutputRenderState) -> bool {
@@ -391,4 +427,57 @@ fn create_placeholder_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu:
         size,
     );
     tex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(actual: [f32; 2], expected: [f32; 2]) {
+        assert!(
+            (actual[0] - expected[0]).abs() < 1e-6 && (actual[1] - expected[1]).abs() < 1e-6,
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn matching_aspect_is_not_cropped() {
+        assert_close(cover_uv_scale((3840, 2160), (2560, 1440)), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn wider_image_is_cropped_horizontally() {
+        // A 16:9 image on a 16:10 laptop panel shows 90% of its width.
+        assert_close(cover_uv_scale((3840, 2160), (2560, 1600)), [0.9, 1.0]);
+    }
+
+    #[test]
+    fn taller_image_is_cropped_vertically() {
+        assert_close(cover_uv_scale((1000, 2000), (2000, 1000)), [1.0, 0.25]);
+    }
+
+    #[test]
+    fn shader_is_valid_and_uniforms_match() {
+        let src = include_str!("shader.wgsl");
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        let (uniforms, _) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
+            .expect("shader declares Uniforms");
+        assert_eq!(
+            layouter[uniforms].size as usize,
+            std::mem::size_of::<Uniforms>()
+        );
+    }
 }

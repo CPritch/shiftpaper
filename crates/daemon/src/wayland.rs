@@ -24,9 +24,16 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use tracing::{debug, info, warn};
 use wayland_client::{
-    Connection, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     globals::GlobalList,
     protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
+};
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
 use crate::config::{Config, TrackingMode};
@@ -45,7 +52,9 @@ pub struct OutputInfo {
     /// Surface size in logical pixels, from the layer surface configure.
     pub width: u32,
     pub height: u32,
-    pub scale: i32,
+    /// Preferred scale in 120ths (192 = 1.6x), from fractional-scale-v1.
+    pub scale_120: u32,
+    hidpi: Option<HiDpi>,
     pub layer_surface: LayerSurface,
     pub configured: bool,
     /// A frame callback is outstanding. Drawing waits for it, so each
@@ -59,7 +68,40 @@ impl OutputInfo {
     fn refresh(&mut self, info: &SctkOutputInfo) {
         self.name = info.name.clone().unwrap_or_default();
         (self.x, self.y) = info.logical_position.unwrap_or(info.location);
-        self.scale = info.scale_factor;
+    }
+
+    /// Swapchain size in physical pixels. Without fractional scaling we
+    /// draw at the logical size and the compositor upscales it.
+    fn buffer_size(&self) -> (u32, u32) {
+        if self.hidpi.is_some() {
+            (
+                scale_up(self.width, self.scale_120),
+                scale_up(self.height, self.scale_120),
+            )
+        } else {
+            (self.width, self.height)
+        }
+    }
+}
+
+/// Logical to physical pixels, rounding half away from zero as the
+/// fractional-scale protocol specifies.
+fn scale_up(logical: u32, scale_120: u32) -> u32 {
+    (logical * scale_120 + 60) / 120
+}
+
+/// Per-surface objects for drawing at the output's fractional scale. The
+/// compositor reports the scale, and the viewport maps our full-resolution
+/// buffer back onto the surface's logical size.
+struct HiDpi {
+    fractional_scale: WpFractionalScaleV1,
+    viewport: WpViewport,
+}
+
+impl Drop for HiDpi {
+    fn drop(&mut self) {
+        self.viewport.destroy();
+        self.fractional_scale.destroy();
     }
 }
 
@@ -71,6 +113,8 @@ pub struct App {
     pub seat_state: SeatState,
     pub layer_shell: LayerShell,
     pub shm: Shm,
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    viewporter: Option<WpViewporter>,
     pub outputs: Vec<OutputInfo>,
     pub renderer: Option<Renderer>,
     pub render_targets: HashMap<String, OutputRenderState>,
@@ -102,6 +146,12 @@ impl App {
             )
         })?;
         let shm = Shm::bind(globals, qh).context("wl_shm not available")?;
+        let fractional_scale_manager: Option<WpFractionalScaleManagerV1> =
+            globals.bind(qh, 1..=1, ()).ok();
+        let viewporter: Option<WpViewporter> = globals.bind(qh, 1..=1, ()).ok();
+        if fractional_scale_manager.is_none() || viewporter.is_none() {
+            info!("fractional scaling unavailable, rendering at logical resolution");
+        }
 
         Ok(Self {
             config,
@@ -111,6 +161,8 @@ impl App {
             seat_state,
             layer_shell,
             shm,
+            fractional_scale_manager,
+            viewporter,
             outputs: Vec::new(),
             renderer: None,
             render_targets: HashMap::new(),
@@ -183,7 +235,7 @@ impl App {
                 let color_path = new_cfg.color_for(&output.name).to_path_buf();
                 let depth_path = new_cfg.depth_for(&output.name);
 
-                let color_view = match renderer.load_wallpaper_texture(&color_path) {
+                let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(name = output.name, "reload: failed to load color: {e:#}");
@@ -207,6 +259,7 @@ impl App {
                 };
 
                 rt.color_view = color_view;
+                rt.image_size = image_size;
                 rt.bind_group = bind_group;
                 info!(name = output.name, "reloaded wallpaper");
             }
@@ -243,6 +296,24 @@ impl App {
             }
             self.advance(qh, idx);
         }
+    }
+
+    /// Match an output's swapchain to its current buffer size, after a
+    /// resize or a scale change.
+    fn resize_swapchain(&mut self, idx: usize) {
+        let o = &self.outputs[idx];
+        let (Some(renderer), Some(rt)) = (&self.renderer, self.render_targets.get_mut(&o.name))
+        else {
+            return;
+        };
+        (rt.config.width, rt.config.height) = o.buffer_size();
+        rt.surface.configure(&renderer.device, &rt.config);
+        info!(
+            name = o.name,
+            w = rt.config.width,
+            h = rt.config.height,
+            "reconfigured swapchain"
+        );
     }
 
     /// Force every output to redraw, e.g. after a config reload or resume.
@@ -382,6 +453,17 @@ impl OutputHandler for App {
         qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        let layer_surface = self.create_layer_surface(qh, &output);
+        let hidpi = match (&self.fractional_scale_manager, &self.viewporter) {
+            (Some(manager), Some(viewporter)) => {
+                let surface = layer_surface.wl_surface();
+                Some(HiDpi {
+                    fractional_scale: manager.get_fractional_scale(surface, qh, ()),
+                    viewport: viewporter.get_viewport(surface, qh, ()),
+                })
+            }
+            _ => None,
+        };
         let mut o = OutputInfo {
             name: String::new(),
             wl_output: output.clone(),
@@ -389,8 +471,9 @@ impl OutputHandler for App {
             y: 0,
             width: 0,
             height: 0,
-            scale: 1,
-            layer_surface: self.create_layer_surface(qh, &output),
+            scale_120: 120,
+            hidpi,
+            layer_surface,
             configured: false,
             frame_pending: false,
             needs_redraw: false,
@@ -413,7 +496,7 @@ impl OutputHandler for App {
         };
         if let Some(o) = self.outputs.iter_mut().find(|o| o.wl_output == output) {
             o.refresh(&info);
-            debug!(name = o.name, scale = o.scale, "output updated");
+            debug!(name = o.name, "output updated");
         }
     }
 
@@ -477,10 +560,12 @@ impl LayerShellHandler for App {
         self.outputs[output_idx].width = w;
         self.outputs[output_idx].height = h;
         self.outputs[output_idx].configured = true;
+        if let Some(hidpi) = &self.outputs[output_idx].hidpi {
+            hidpi.viewport.set_destination(w as i32, h as i32);
+        }
 
         let output_name = self.outputs[output_idx].name.clone();
-        let output_w = self.outputs[output_idx].width;
-        let output_h = self.outputs[output_idx].height;
+        let (buffer_w, buffer_h) = self.outputs[output_idx].buffer_size();
 
         let renderer = self.renderer.as_ref().unwrap();
 
@@ -520,8 +605,8 @@ impl LayerShellHandler for App {
             let surface_config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                width: output_w,
-                height: output_h,
+                width: buffer_w,
+                height: buffer_h,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode,
                 view_formats: vec![],
@@ -533,7 +618,7 @@ impl LayerShellHandler for App {
             let color_path = self.config.color_for(&output_name).to_path_buf();
             let depth_path = self.config.depth_for(&output_name);
 
-            let color_view = match renderer.load_wallpaper_texture(&color_path) {
+            let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("failed to load color texture: {e:#}");
@@ -569,6 +654,7 @@ impl LayerShellHandler for App {
                 config: surface_config,
                 bind_group,
                 color_view,
+                image_size,
                 uniform_buffer,
                 current_offset: (0.0, 0.0),
                 target_offset: (0.0, 0.0),
@@ -578,22 +664,12 @@ impl LayerShellHandler for App {
                 .insert(output_name.clone(), render_state);
             info!(
                 name = output_name,
-                w = output_w,
-                h = output_h,
+                w = buffer_w,
+                h = buffer_h,
                 "output initialized"
             );
         } else {
-            if let Some(rt) = self.render_targets.get_mut(&output_name) {
-                rt.config.width = output_w;
-                rt.config.height = output_h;
-                rt.surface.configure(&renderer.device, &rt.config);
-                info!(
-                    name = output_name,
-                    w = output_w,
-                    h = output_h,
-                    "reconfigured swapchain"
-                );
-            }
+            self.resize_swapchain(output_idx);
         }
 
         // Draw now rather than waiting for the next cursor movement, so a
@@ -715,3 +791,61 @@ delegate_seat!(App);
 delegate_pointer!(App);
 delegate_registry!(App);
 delegate_shm!(App);
+
+impl Dispatch<WpFractionalScaleV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let wp_fractional_scale_v1::Event::PreferredScale { scale } = event else {
+            return;
+        };
+        let Some(idx) = state.outputs.iter().position(|o| {
+            o.hidpi
+                .as_ref()
+                .is_some_and(|h| &h.fractional_scale == proxy)
+        }) else {
+            return;
+        };
+        if state.outputs[idx].scale_120 == scale {
+            return;
+        }
+        debug!(
+            name = state.outputs[idx].name,
+            scale_120 = scale,
+            "preferred scale changed"
+        );
+        state.outputs[idx].scale_120 = scale;
+        state.resize_swapchain(idx);
+        state.outputs[idx].needs_redraw = true;
+        state.advance(qh, idx);
+    }
+}
+
+// These interfaces have no events.
+delegate_noop!(App: WpFractionalScaleManagerV1);
+delegate_noop!(App: WpViewporter);
+delegate_noop!(App: WpViewport);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scales_logical_to_physical() {
+        // A 1.6x laptop panel: 1600x1000 logical is 2560x1600 physical.
+        assert_eq!(scale_up(1600, 192), 2560);
+        assert_eq!(scale_up(1000, 192), 1600);
+        assert_eq!(scale_up(2560, 120), 2560);
+    }
+
+    #[test]
+    fn rounds_half_away_from_zero() {
+        // 1366 at 1.25x is 1707.5 physical pixels.
+        assert_eq!(scale_up(1366, 150), 1708);
+    }
+}
