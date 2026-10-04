@@ -52,7 +52,9 @@ shiftpaper set ~/Pictures/wallpaper.jpg
 systemctl --user enable --now shiftpaperd
 ```
 
-To change wallpaper, `shiftpaper set` another image and run `systemctl --user reload shiftpaperd`.
+To change wallpaper, `shiftpaper set` another image and run `systemctl --user reload shiftpaperd`. The new one morphs in through the depth of the scene.
+
+For a slideshow, run `shiftpaper slideshow ~/Pictures/walls --interval 10m` and reload.
 
 `shiftpaper fetch-model --list` shows the other depth models. Their licences are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
