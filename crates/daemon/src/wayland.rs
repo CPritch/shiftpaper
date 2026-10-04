@@ -38,6 +38,7 @@ use wayland_protocols::wp::{
 
 use crate::cursor::HyprlandCursor;
 use crate::renderer::{OutputRenderState, Renderer, Wallpaper};
+use crate::slideshow::Slideshow;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -118,6 +119,7 @@ pub struct App {
     pub outputs: Vec<OutputInfo>,
     pub renderer: Option<Renderer>,
     pub render_targets: HashMap<String, OutputRenderState>,
+    slideshow: Option<Slideshow>,
     pub cursor: Option<HyprlandCursor>,
     pub pointer: Option<wl_pointer::WlPointer>,
     pub seat: Option<wl_seat::WlSeat>,
@@ -154,6 +156,7 @@ impl App {
         }
 
         Ok(Self {
+            slideshow: config.slideshow.clone().map(Slideshow::new),
             config,
             registry_state,
             compositor_state,
@@ -219,6 +222,8 @@ impl App {
             warn!("idle_timeout_secs changed, restart required to take effect");
         }
 
+        // Start the slideshow afresh, as its images may have changed.
+        self.slideshow = new_cfg.slideshow.clone().map(Slideshow::new);
         let renderer = match &self.renderer {
             Some(r) => r,
             None => {
@@ -233,7 +238,9 @@ impl App {
                 continue;
             }
             if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let Some(wallpaper) = load_wallpaper_for(renderer, &new_cfg, &output.name) else {
+                let Some(wallpaper) =
+                    load_wallpaper_for(renderer, &new_cfg, self.slideshow.as_mut(), &output.name)
+                else {
                     continue;
                 };
                 rt.start_transition(renderer, wallpaper, duration, near_first);
@@ -244,6 +251,32 @@ impl App {
         self.config = new_cfg;
         self.needs_render = true;
         info!("config reloaded via SIGHUP");
+    }
+
+    /// Move the slideshow on once the next slide is due and loaded. Called
+    /// from the main loop, which wakes at least twice a second.
+    pub fn update_slideshow(&mut self, qh: &QueueHandle<Self>) {
+        if !self.render_allowed() {
+            return;
+        }
+        let (Some(renderer), Some(slideshow)) = (&self.renderer, &mut self.slideshow) else {
+            return;
+        };
+        let Some(next) = slideshow.poll(renderer) else {
+            return;
+        };
+
+        let (duration, near_first) = transition_settings(&self.config);
+        for output in &self.outputs {
+            if self.config.in_slideshow(&output.name)
+                && let Some(rt) = self.render_targets.get_mut(&output.name)
+            {
+                rt.start_transition(renderer, next.clone(), duration, near_first);
+            }
+        }
+        for idx in 0..self.outputs.len() {
+            self.advance(qh, idx);
+        }
     }
 
     pub fn init_cursor(&mut self) {
@@ -359,13 +392,25 @@ impl App {
     }
 }
 
-/// Load what an output should show: its own wallpaper or the global one.
-/// Logs why if there's nothing to show.
+/// Load what an output should show: the current slide if it's in the
+/// slideshow, else its own wallpaper or the global one. Logs why if there's
+/// nothing to show.
+///
+/// This takes the parts of `App` it needs rather than `&mut self`, so
+/// callers can hold the renderer and a render target at the same time.
 fn load_wallpaper_for(
     renderer: &Renderer,
     config: &Config,
+    slideshow: Option<&mut Slideshow>,
     output_name: &str,
 ) -> Option<Wallpaper> {
+    if config.in_slideshow(output_name) {
+        let wallpaper = slideshow?.current(renderer);
+        if wallpaper.is_none() {
+            warn!(name = output_name, "none of the slideshow's images loaded");
+        }
+        return wallpaper;
+    }
     let (Some(color), Some(depth)) = (config.color_for(output_name), config.depth_for(output_name))
     else {
         warn!(name = output_name, "no wallpaper set for this output");
@@ -619,7 +664,12 @@ impl LayerShellHandler for App {
 
             surface.configure(&renderer.device, &surface_config);
 
-            let Some(wallpaper) = load_wallpaper_for(renderer, &self.config, &output_name) else {
+            let Some(wallpaper) = load_wallpaper_for(
+                renderer,
+                &self.config,
+                self.slideshow.as_mut(),
+                &output_name,
+            ) else {
                 return;
             };
             let render_state = OutputRenderState::new(renderer, surface, surface_config, wallpaper);
