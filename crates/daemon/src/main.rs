@@ -94,8 +94,6 @@ fn main() -> Result<()> {
         }
     }
 
-    app.render_all(&qh);
-
     let mut event_loop: calloop::EventLoop<wayland::App> =
         calloop::EventLoop::try_new().context("failed to create calloop event loop")?;
     let loop_handle = event_loop.handle();
@@ -154,7 +152,7 @@ fn main() -> Result<()> {
 
         if app.needs_render {
             app.needs_render = false;
-            app.render_all(&qh);
+            app.redraw_all(&qh);
         }
     }
 
