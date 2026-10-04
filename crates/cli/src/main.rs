@@ -2,6 +2,7 @@ mod cache;
 mod config;
 mod depth;
 mod fetch_model;
+mod moge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -168,7 +169,7 @@ fn bake(input: &Path, out: Option<&Path>, model: &Path) -> Result<cache::BakedPa
         .with_context(|| format!("failed to open {}", input.display()))?
         .to_rgba8();
 
-    let hash = cache::hash_source(&rgba);
+    let hash = cache::hash_source(&rgba, model);
     let out_dir = out
         .map(|p| p.to_path_buf())
         .unwrap_or_else(cache::cache_dir);

@@ -18,13 +18,18 @@ pub fn cache_dir() -> PathBuf {
 
 /// Bump when a change to baking alters its output, so images baked by an
 /// older version are baked again instead of reused from the cache.
-const BAKE_VERSION: &[u8] = b"2";
+const BAKE_VERSION: &[u8] = b"3";
 
-/// Cache key for a source image: blake3 of the bake version and the
-/// decoded RGBA bytes.
-pub fn hash_source(rgba: &image::RgbaImage) -> String {
+/// Cache key for a source image baked with a model: blake3 of the bake
+/// version, the model's path and size, and the decoded RGBA bytes. The same
+/// image baked with a different model gets a different key.
+pub fn hash_source(rgba: &image::RgbaImage, model: &Path) -> String {
+    let model = model.canonicalize().unwrap_or_else(|_| model.to_path_buf());
+    let model_size = std::fs::metadata(&model).map_or(0, |m| m.len());
     blake3::Hasher::new()
         .update(BAKE_VERSION)
+        .update(model.as_os_str().as_encoded_bytes())
+        .update(&model_size.to_le_bytes())
         .update(rgba.as_raw())
         .finalize()
         .to_hex()
@@ -77,4 +82,21 @@ pub fn write_depth(depth: &DepthMap, path: &Path) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_depends_on_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.onnx"), dir.path().join("b.onnx"));
+        std::fs::write(&a, b"model a").unwrap();
+        std::fs::write(&b, b"model b").unwrap();
+        let image = image::RgbaImage::new(2, 2);
+
+        assert_eq!(hash_source(&image, &a), hash_source(&image, &a));
+        assert_ne!(hash_source(&image, &a), hash_source(&image, &b));
+    }
 }
