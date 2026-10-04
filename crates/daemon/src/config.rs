@@ -113,18 +113,19 @@ impl Config {
     }
 
     pub fn depth_for(&self, output_name: &str) -> PathBuf {
-        if let Some(d) = self
-            .monitor
-            .iter()
-            .find(|m| m.name == output_name)
-            .and_then(|m| m.depth.as_deref())
-        {
+        let monitor = self.monitor.iter().find(|m| m.name == output_name);
+        if let Some(d) = monitor.and_then(|m| m.depth.as_deref()) {
             return d.to_path_buf();
+        }
+        // The global depth map belongs to the global color image, so a
+        // monitor with its own color must infer its depth from that instead.
+        if let Some(c) = monitor.and_then(|m| m.color.as_deref()) {
+            return infer_depth_path(c);
         }
         if let Some(d) = &self.wallpaper.depth {
             return d.clone();
         }
-        infer_depth_path(self.color_for(output_name))
+        infer_depth_path(&self.wallpaper.color)
     }
 
     pub fn intensity_for(&self, output_name: &str) -> f32 {
@@ -167,4 +168,106 @@ fn expand_tilde(p: &Path) -> PathBuf {
         return PathBuf::from(home).join(stripped);
     }
     p.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn infers_depth_from_baked_color_name() {
+        assert_eq!(
+            infer_depth_path(Path::new("/c/abc.color.png")),
+            PathBuf::from("/c/abc.depth16.png")
+        );
+    }
+
+    #[test]
+    fn infers_depth_from_other_image_names() {
+        assert_eq!(
+            infer_depth_path(Path::new("/p/photo.jpg")),
+            PathBuf::from("/p/photo.depth16.png")
+        );
+    }
+
+    #[test]
+    fn global_depth_inferred_when_unset() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        );
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/global.depth16.png")
+        );
+    }
+
+    #[test]
+    fn monitor_color_override_does_not_use_global_depth() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+            depth = "/w/global.depth16.png"
+
+            [[monitor]]
+            name = "DP-1"
+            color = "/w/external.color.png"
+            "#,
+        );
+        assert_eq!(cfg.color_for("DP-1"), Path::new("/w/external.color.png"));
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/external.depth16.png")
+        );
+        assert_eq!(cfg.color_for("eDP-1"), Path::new("/w/global.color.png"));
+        assert_eq!(
+            cfg.depth_for("eDP-1"),
+            PathBuf::from("/w/global.depth16.png")
+        );
+    }
+
+    #[test]
+    fn monitor_depth_override_wins() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+
+            [[monitor]]
+            name = "DP-1"
+            color = "/w/external.color.png"
+            depth = "/w/hand_made.depth16.png"
+            "#,
+        );
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/hand_made.depth16.png")
+        );
+    }
+
+    #[test]
+    fn intensity_falls_back_to_daemon_setting() {
+        let cfg = parse(
+            r#"
+            [daemon]
+            parallax_intensity = 0.05
+
+            [wallpaper]
+            color = "/w/global.color.png"
+
+            [[monitor]]
+            name = "DP-1"
+            parallax_intensity = 0.1
+            "#,
+        );
+        assert_eq!(cfg.intensity_for("DP-1"), 0.1);
+        assert_eq!(cfg.intensity_for("eDP-1"), 0.05);
+    }
 }
