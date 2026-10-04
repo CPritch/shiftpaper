@@ -4,10 +4,17 @@ on:
   push:
     tags:
       - 'v[0-9]+.*'
+  # Publish an existing release to the AUR again, without rebuilding it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish to the AUR, e.g. v0.3.0
+        required: true
 
 jobs:
   build:
     name: Build release binaries
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -76,19 +83,30 @@ jobs:
   aur:
     name: Publish to the AUR
     needs: build
+    # Runs after a successful build, or on its own when build is skipped
+    # for a manual run.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     container: archlinux:base-devel
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     defaults:
       run:
         shell: bash
 
     steps:
+      # Without git, actions/checkout downloads GitHub's tarball instead,
+      # which leaves out packaging/ (it's export-ignore), so install it first.
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git openssh pacman-contrib
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       # makepkg refuses to run as root, so builds happen as this user.
       - name: Set up a build user
         run: |
-          pacman -Syu --noconfirm --needed git openssh pacman-contrib
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
           cp -r packaging/aur/shiftpaper /home/builder/pkg
@@ -97,9 +115,9 @@ jobs:
       - name: Point the PKGBUILD at this release
         working-directory: /home/builder/pkg
         run: |
-          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${TAG#v}/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
           sudo -u builder updpkgsums
-          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+          sudo -u builder sh -c 'makepkg --printsrcinfo > .SRCINFO'
 
       # Never publish a PKGBUILD that doesn't build and pass its tests.
       - name: Test-build the package
@@ -129,7 +147,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "The AUR already has this version."
           else
-            git commit -m "Update to ${GITHUB_REF_NAME#v}"
+            git commit -m "Update to ${TAG#v}"
             git push origin master
           fi
 
