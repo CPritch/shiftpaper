@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -12,16 +13,12 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
-    #[serde(default = "default_poll_hz")]
-    pub cursor_poll_hz: u32,
-    #[serde(default = "default_intensity")]
+    pub cursor_poll_hz: NonZeroU32,
     pub parallax_intensity: f32,
-    #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
-    #[serde(default = "default_battery_threshold")]
     pub battery_threshold: u8,
-    #[serde(default)]
     pub tracking_mode: TrackingMode,
 }
 
@@ -39,13 +36,14 @@ pub enum TrackingMode {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct WallpaperConfig {
     pub color: PathBuf,
-    #[serde(default)]
     pub depth: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MonitorOverride {
     pub name: String,
     pub color: Option<PathBuf>,
@@ -56,26 +54,13 @@ pub struct MonitorOverride {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            cursor_poll_hz: default_poll_hz(),
-            parallax_intensity: default_intensity(),
-            idle_timeout_secs: default_idle_timeout(),
-            battery_threshold: default_battery_threshold(),
+            cursor_poll_hz: const { NonZeroU32::new(60).unwrap() },
+            parallax_intensity: 0.025,
+            idle_timeout_secs: 300,
+            battery_threshold: 20,
             tracking_mode: TrackingMode::default(),
         }
     }
-}
-
-fn default_poll_hz() -> u32 {
-    60
-}
-fn default_intensity() -> f32 {
-    0.025
-}
-fn default_idle_timeout() -> u64 {
-    300
-}
-fn default_battery_threshold() -> u8 {
-    20
 }
 
 impl Config {
@@ -86,17 +71,18 @@ impl Config {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
 
-        let mut cfg: Config = toml::from_str(&text).with_context(|| "failed to parse config")?;
+        let mut cfg: Config =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
 
         cfg.wallpaper.color = expand_tilde(&cfg.wallpaper.color);
-        if let Some(ref mut p) = cfg.wallpaper.depth {
+        if let Some(p) = &mut cfg.wallpaper.depth {
             *p = expand_tilde(p);
         }
         for m in &mut cfg.monitor {
-            if let Some(ref mut p) = m.color {
+            if let Some(p) = &mut m.color {
                 *p = expand_tilde(p);
             }
-            if let Some(ref mut p) = m.depth {
+            if let Some(p) = &mut m.depth {
                 *p = expand_tilde(p);
             }
         }
@@ -104,33 +90,34 @@ impl Config {
         Ok(cfg)
     }
 
+    fn override_for(&self, output_name: &str) -> Option<&MonitorOverride> {
+        self.monitor.iter().find(|m| m.name == output_name)
+    }
+
     pub fn color_for(&self, output_name: &str) -> &Path {
-        self.monitor
-            .iter()
-            .find(|m| m.name == output_name)
+        self.override_for(output_name)
             .and_then(|m| m.color.as_deref())
             .unwrap_or(&self.wallpaper.color)
     }
 
     pub fn depth_for(&self, output_name: &str) -> PathBuf {
-        if let Some(d) = self
-            .monitor
-            .iter()
-            .find(|m| m.name == output_name)
-            .and_then(|m| m.depth.as_deref())
-        {
+        let monitor = self.override_for(output_name);
+        if let Some(d) = monitor.and_then(|m| m.depth.as_deref()) {
             return d.to_path_buf();
+        }
+        // The global depth map belongs to the global color image, so a
+        // monitor with its own color must infer its depth from that instead.
+        if let Some(c) = monitor.and_then(|m| m.color.as_deref()) {
+            return infer_depth_path(c);
         }
         if let Some(d) = &self.wallpaper.depth {
             return d.clone();
         }
-        infer_depth_path(self.color_for(output_name))
+        infer_depth_path(&self.wallpaper.color)
     }
 
     pub fn intensity_for(&self, output_name: &str) -> f32 {
-        self.monitor
-            .iter()
-            .find(|m| m.name == output_name)
+        self.override_for(output_name)
             .and_then(|m| m.parallax_intensity)
             .unwrap_or(self.daemon.parallax_intensity)
     }
@@ -167,4 +154,165 @@ fn expand_tilde(p: &Path) -> PathBuf {
         return PathBuf::from(home).join(stripped);
     }
     p.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn missing_daemon_keys_use_defaults() {
+        let cfg = parse(
+            r#"
+            [daemon]
+            tracking_mode = "hyprland"
+
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        );
+        assert_eq!(cfg.daemon.tracking_mode, TrackingMode::Hyprland);
+        assert_eq!(cfg.daemon.parallax_intensity, 0.025);
+        assert_eq!(cfg.daemon.idle_timeout_secs, 300);
+        assert_eq!(cfg.daemon.battery_threshold, 20);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err = toml::from_str::<Config>(
+            r#"
+            [daemon]
+            parallax_intensty = 0.05
+
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parallax_intensty"));
+    }
+
+    #[test]
+    fn zero_poll_rate_is_rejected() {
+        let result = toml::from_str::<Config>(
+            r#"
+            [daemon]
+            cursor_poll_hz = 0
+
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_inference_section_is_accepted() {
+        parse(
+            r#"
+            [inference]
+            model_path = "/m/model.onnx"
+
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        );
+    }
+
+    #[test]
+    fn infers_depth_from_baked_color_name() {
+        assert_eq!(
+            infer_depth_path(Path::new("/c/abc.color.png")),
+            PathBuf::from("/c/abc.depth16.png")
+        );
+    }
+
+    #[test]
+    fn infers_depth_from_other_image_names() {
+        assert_eq!(
+            infer_depth_path(Path::new("/p/photo.jpg")),
+            PathBuf::from("/p/photo.depth16.png")
+        );
+    }
+
+    #[test]
+    fn global_depth_inferred_when_unset() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+            "#,
+        );
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/global.depth16.png")
+        );
+    }
+
+    #[test]
+    fn monitor_color_override_does_not_use_global_depth() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+            depth = "/w/global.depth16.png"
+
+            [[monitor]]
+            name = "DP-1"
+            color = "/w/external.color.png"
+            "#,
+        );
+        assert_eq!(cfg.color_for("DP-1"), Path::new("/w/external.color.png"));
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/external.depth16.png")
+        );
+        assert_eq!(cfg.color_for("eDP-1"), Path::new("/w/global.color.png"));
+        assert_eq!(
+            cfg.depth_for("eDP-1"),
+            PathBuf::from("/w/global.depth16.png")
+        );
+    }
+
+    #[test]
+    fn monitor_depth_override_wins() {
+        let cfg = parse(
+            r#"
+            [wallpaper]
+            color = "/w/global.color.png"
+
+            [[monitor]]
+            name = "DP-1"
+            color = "/w/external.color.png"
+            depth = "/w/hand_made.depth16.png"
+            "#,
+        );
+        assert_eq!(
+            cfg.depth_for("DP-1"),
+            PathBuf::from("/w/hand_made.depth16.png")
+        );
+    }
+
+    #[test]
+    fn intensity_falls_back_to_daemon_setting() {
+        let cfg = parse(
+            r#"
+            [daemon]
+            parallax_intensity = 0.05
+
+            [wallpaper]
+            color = "/w/global.color.png"
+
+            [[monitor]]
+            name = "DP-1"
+            parallax_intensity = 0.1
+            "#,
+        );
+        assert_eq!(cfg.intensity_for("DP-1"), 0.1);
+        assert_eq!(cfg.intensity_for("eDP-1"), 0.05);
+    }
 }

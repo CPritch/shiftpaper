@@ -89,7 +89,7 @@ fn main() -> Result<()> {
     match cfg.daemon.tracking_mode {
         config::TrackingMode::Hyprland => {
             info!("tracking mode: hyprland (IPC polling)");
-            app.init_cursor(cfg.daemon.cursor_poll_hz);
+            app.init_cursor(cfg.daemon.cursor_poll_hz.get());
         }
         config::TrackingMode::Pointer => {
             info!("tracking mode: pointer (Wayland-native, event-driven)");
@@ -107,7 +107,7 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to insert Wayland source: {e}"))?;
 
     if matches!(cfg.daemon.tracking_mode, config::TrackingMode::Hyprland) {
-        let poll_interval = Duration::from_secs_f64(1.0 / cfg.daemon.cursor_poll_hz as f64);
+        let poll_interval = Duration::from_secs_f64(1.0 / cfg.daemon.cursor_poll_hz.get() as f64);
         let tick_timer = Timer::immediate();
         let qh_tick = qh.clone();
 
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to insert timer source: {e}"))?;
 
         info!(
-            hz = cfg.daemon.cursor_poll_hz,
+            hz = cfg.daemon.cursor_poll_hz.get(),
             "hyprland tick timer inserted"
         );
     }
