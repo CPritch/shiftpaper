@@ -12,7 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["cuda"]
 cuda = ["ort/cuda"]
-load-dynamic = ["ort/load-dynamic"]
+load-dynamic = ["ort/load-dynamic", "dep:libloading"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -24,6 +24,8 @@ image = { workspace = true, features = ["jpeg", "png", "webp"] }
 shiftpaper-config = { workspace = true, features = ["clap"] }
 
 ort = { version = "=2.0.0-rc.12" }
+# Only used to check libonnxruntime loads before ort tries (see depth.rs).
+libloading = { version = "0.9", optional = true }
 blake3 = "1"
 
 clap = { version = "4", features = ["derive", "env"] }

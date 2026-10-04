@@ -26,6 +26,8 @@ const STD: [f32; 3] = [0.229, 0.224, 0.225];
 /// where 1.0 = closest to the camera.
 pub fn estimate(rgba: &RgbaImage, model_path: &Path) -> Result<DepthMap> {
     let (orig_w, orig_h) = rgba.dimensions();
+    #[cfg(feature = "load-dynamic")]
+    check_onnxruntime_loads()?;
     let mut session = load_session(model_path)?;
     let model = ModelInput::read(&session)?;
     let (in_w, in_h) = model
@@ -73,14 +75,48 @@ pub fn estimate(rgba: &RgbaImage, model_path: &Path) -> Result<DepthMap> {
     })
 }
 
-/// Load the model, preferring CUDA. If CUDA isn't available, ort logs it
-/// and falls back to the CPU on its own.
+/// Check that libonnxruntime loads before ort tries to. When ort's own load
+/// fails, it builds the error through the library it couldn't load and
+/// deadlocks, so a broken install would hang with no output.
+#[cfg(feature = "load-dynamic")]
+fn check_onnxruntime_loads() -> Result<()> {
+    // The same lookup as ort: $ORT_DYLIB_PATH or libonnxruntime.so, using
+    // a copy beside the executable if there is one.
+    let name = std::env::var_os("ORT_DYLIB_PATH")
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "libonnxruntime.so".into());
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(&name)))
+        .filter(|p| p.exists());
+    let path = beside_exe.unwrap_or_else(|| name.into());
+
+    // SAFETY: loading a library runs its initialisers, and this is the
+    // library ort is about to load anyway.
+    let lib = unsafe { libloading::Library::new(&path) }.with_context(|| {
+        format!(
+            "failed to load ONNX Runtime from {}. Is onnxruntime installed, \
+             with all of its dependencies up to date?",
+            path.display()
+        )
+    })?;
+    // Keep it loaded so ort's own load reuses it instead of loading it again.
+    std::mem::forget(lib);
+    Ok(())
+}
+
+/// Load the model, preferring a GPU: CUDA for NVIDIA, MIGraphX for AMD.
+/// Providers missing from the installed onnxruntime are skipped, and ort
+/// falls back to the CPU on its own.
 fn load_session(model_path: &Path) -> Result<Session> {
     Session::builder()
         .map_err(|e| anyhow::anyhow!("failed to create ONNX session builder: {e}"))?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
-        .with_execution_providers([ort::ep::CUDA::default().build()])
+        .with_execution_providers([
+            ort::ep::CUDA::default().build(),
+            ort::ep::MIGraphX::default().build(),
+        ])
         .map_err(|e| anyhow::anyhow!("failed to set execution providers: {e}"))?
         .commit_from_file(model_path)
         .map_err(|e| {
