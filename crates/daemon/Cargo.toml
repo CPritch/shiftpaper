@@ -34,3 +34,6 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 nix = { version = "0.29", features = ["signal"] }
 pollster = "0.4.0"
+[dev-dependencies]
+# Same version wgpu uses internally, to validate shader.wgsl in tests.
+naga = { version = "23", features = ["wgsl-in"] }

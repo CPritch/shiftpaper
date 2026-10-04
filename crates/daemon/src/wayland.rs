@@ -183,7 +183,7 @@ impl App {
                 let color_path = new_cfg.color_for(&output.name).to_path_buf();
                 let depth_path = new_cfg.depth_for(&output.name);
 
-                let color_view = match renderer.load_wallpaper_texture(&color_path) {
+                let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(name = output.name, "reload: failed to load color: {e:#}");
@@ -207,6 +207,7 @@ impl App {
                 };
 
                 rt.color_view = color_view;
+                rt.image_size = image_size;
                 rt.bind_group = bind_group;
                 info!(name = output.name, "reloaded wallpaper");
             }
@@ -533,7 +534,7 @@ impl LayerShellHandler for App {
             let color_path = self.config.color_for(&output_name).to_path_buf();
             let depth_path = self.config.depth_for(&output_name);
 
-            let color_view = match renderer.load_wallpaper_texture(&color_path) {
+            let (color_view, image_size) = match renderer.load_wallpaper_texture(&color_path) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("failed to load color texture: {e:#}");
@@ -569,6 +570,7 @@ impl LayerShellHandler for App {
                 config: surface_config,
                 bind_group,
                 color_view,
+                image_size,
                 uniform_buffer,
                 current_offset: (0.0, 0.0),
                 target_offset: (0.0, 0.0),
