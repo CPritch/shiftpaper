@@ -1682,13 +1682,22 @@ dependencies = [
  "image",
  "indicatif",
  "ort",
- "serde",
+ "shiftpaper-config",
  "tempfile",
- "toml",
  "toml_edit",
  "tracing",
  "tracing-subscriber",
  "ureq",
+]
+
+[[package]]
+name = "shiftpaper-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1704,9 +1713,8 @@ dependencies = [
  "nix",
  "pollster",
  "raw-window-handle",
- "serde",
+ "shiftpaper-config",
  "smithay-client-toolkit",
- "toml",
  "tracing",
  "tracing-subscriber",
  "wayland-backend",

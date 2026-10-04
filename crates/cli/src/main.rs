@@ -4,7 +4,8 @@ mod depth;
 mod fetch_model;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use shiftpaper_config::{Config, TrackingMode};
 use std::path::{Path, PathBuf};
 use toml_edit::value;
 use tracing::info;
@@ -99,27 +100,6 @@ enum Command {
     },
 }
 
-/// Cursor tracking mode. Mirrors `crate::config::TrackingMode` in the
-/// daemon — kept here as a separate enum so the CLI can write the
-/// string value via toml_edit without depending on the daemon crate.
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum TrackingMode {
-    /// Wayland-native pointer events. Default. Works on any
-    /// wlr-layer-shell compositor.
-    Pointer,
-    /// Hyprland IPC global cursor polling. Hyprland-only.
-    Hyprland,
-}
-
-impl TrackingMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pointer => "pointer",
-            Self::Hyprland => "hyprland",
-        }
-    }
-}
-
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -153,7 +133,7 @@ fn resolve_model(arg: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(p);
     }
     // 2. [inference] model_path in config.toml
-    if let Some(cfg) = config::try_load()?
+    if let Some(cfg) = Config::load()?
         && let Some(inference) = cfg.inference
     {
         let p = inference.model_path;
@@ -229,23 +209,13 @@ fn mode_cmd(mode: Option<TrackingMode>) -> Result<()> {
             eprintln!("  systemctl --user restart shiftpaperd");
         }
         None => {
-            let current = read_tracking_mode()?;
-            match current.as_deref() {
-                Some(m) => println!("{m}"),
-                None => println!("pointer"),
-            }
+            let mode = Config::load()?
+                .map(|cfg| cfg.daemon.tracking_mode)
+                .unwrap_or_default();
+            println!("{}", mode.as_str());
         }
     }
     Ok(())
-}
-
-fn read_tracking_mode() -> Result<Option<String>> {
-    let doc = config::read_document()?;
-    Ok(doc
-        .get("daemon")
-        .and_then(|d| d.get("tracking_mode"))
-        .and_then(|m| m.as_str())
-        .map(String::from))
 }
 
 fn update_tracking_mode(mode: TrackingMode) -> Result<()> {
@@ -262,7 +232,6 @@ fn update_daemon_config(paths: &cache::BakedPaths, model: &Path) -> Result<()> {
         let wallpaper = config::table(doc, "wallpaper")?;
         wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
         wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
-        wallpaper.remove("path"); // legacy field from pre-workspace schema
         Ok(())
     })
 }

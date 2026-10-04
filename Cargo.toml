@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/daemon", "crates/cli"]
+members = ["crates/config", "crates/daemon", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,3 +15,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 image = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
+shiftpaper-config = { path = "crates/config" }
