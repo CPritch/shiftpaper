@@ -18,8 +18,8 @@ target
 
 /target
 
-# makepkg artefacts
+# makepkg artefacts: build dirs, downloaded sources and built packages
 packaging/aur/*/src/
 packaging/aur/*/pkg/
-packaging/aur/*/*.pkg.tar.*
-packaging/aur/*/*.src.tar.*
+packaging/aur/*/*.tar.*
+packaging/aur/shiftpaper-git/shiftpaper-git/

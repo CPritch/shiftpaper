@@ -3,12 +3,15 @@ Description=Shiftpaper parallax wallpaper daemon
 Documentation=https://github.com/CPritch/shiftpaper
 PartOf=graphical-session.target
 After=graphical-session.target
+# Stop after repeated failures, such as having no config yet, instead of
+# restarting every few seconds forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
-# Resolved from PATH — works for both cargo install (~/.cargo/bin) and
-# packaged installs (/usr/bin). If this fails, add:
-#   Environment="PATH=/usr/bin:%h/.cargo/bin"
+# systemd looks a bare command name up in /usr/local/bin and /usr/bin, not
+# $PATH. For a `cargo install` into ~/.cargo/bin, use the full path here.
 ExecStart=shiftpaperd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
