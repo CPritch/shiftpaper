@@ -17,129 +17,53 @@ The daemon has no ML dependencies. All inference happens in the CLI.
 
 ## Dependencies
 
-- Wayland compositor with wlr-layer-shell support (see [Supported compositors](#supported-compositors))
+- Wayland compositor with wlr-layer-shell support (see [Compositors](#compositors))
 - Vulkan-capable GPU
-- ONNX Runtime (`onnxruntime` on Arch; pick a CUDA or ROCm variant if you want GPU inference)
+- ONNX Runtime (`onnxruntime` on Arch, or `onnxruntime-cuda` to bake on an NVIDIA GPU)
 
 Building from source additionally requires a Rust toolchain.
 
-The depth model is downloaded automatically by `shiftpaper fetch-model`.
-
 ## Install
 
-### Arch Linux (AUR)
+Arch Linux (AUR):
 
 ```
 paru -S shiftpaper        # or yay, pikaur, etc.
 ```
 
-### From source
+From source:
 
 ```
 cargo install --path crates/cli
 cargo install --path crates/daemon
 ```
 
-If you want to use the systemd user service with a source build, install to somewhere like `/usr/local` so the binaries are in systemd's lookup path:
-
-```
-cargo install --root /usr/local --path crates/cli
-cargo install --root /usr/local --path crates/daemon
-```
-
 ## Quick start
 
 ```
-shiftpaper fetch-model
+shiftpaper fetch-model                      # downloads the depth model (~99 MB)
 shiftpaper set ~/Pictures/wallpaper.jpg
-```
-
-`fetch-model` downloads Depth Anything V2 Small (~97 MB) from HuggingFace to `~/.local/share/shiftpaper/models/` and saves the path to config. After that, `set` needs no `--model` flag.
-
-If you already have a model, skip fetch-model and pass it directly:
-
-```
-shiftpaper set ~/Pictures/wallpaper.jpg --model ~/path/to/model.onnx
-```
-
-The model path is saved to config so `--model` is only needed once.
-
-## Running the daemon
-
-Directly:
-
-```
-shiftpaperd
-```
-
-As a systemd user service. The AUR package ships the unit file at `/usr/lib/systemd/user/`, so:
-
-```
 systemctl --user enable --now shiftpaperd
 ```
 
-For source installs, copy the unit file first:
+To change wallpaper, `shiftpaper set` another image and run `systemctl --user reload shiftpaperd`.
 
-```
-cp shiftpaperd.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now shiftpaperd
-```
+From a source install, run `shiftpaperd` directly, or copy `shiftpaperd.service` into `~/.config/systemd/user/` and point its `ExecStart` at your binary.
 
-Change wallpapers without restarting:
+## Tracking modes
 
-```
-shiftpaper set ~/Pictures/new_wallpaper.jpg
-systemctl --user reload shiftpaperd
-```
+- `pointer` (default): works on any wlr-layer-shell compositor. The wallpaper only moves while the cursor is over the desktop.
+- `hyprland`: follows the cursor everywhere, even over windows. Hyprland only, and it lets the daemon see the cursor over other apps.
 
-## CLI referenceland
+Switch with `shiftpaper mode hyprland`, then restart the daemon.
 
-| Command | Description |
-|---------|-------------|
-| `shiftpaper fetch-model` | Download the default depth model from HuggingFace |
-| `shiftpaper set <image>` | Bake an image and set it as the active wallpaper |
-| `shiftpaper bake <image>` | Bake an image without changing the active wallpaper |
-| `shiftpaper mode [pointer\|hyprland]` | Show or set the cursor tracking mode |
+## Docs
 
-## Config
+Proper docs are still to come. Until then, `shiftpaper --help` covers the CLI, and the config lives at `~/.config/shiftpaper/config.toml`.
 
-Lives at `~/.config/shiftpaper/config.toml`. Mostly managed by the CLI but you can edit it by hand.
+## Compositors
 
-```toml
-[daemon]
-parallax_intensity = 0.025
-tracking_mode = "pointer"       # "pointer" (Wayland-native) or "hyprland" (IPC)
-idle_timeout_secs = 300
-battery_threshold = 20          # percent; 0 to disable
-
-[inference]
-model_path = "~/.local/share/shiftpaper/models/depth_anything_v2_small.onnx"
-
-[wallpaper]
-color = "~/.cache/shiftpaper/wallpapers/abc123.color.png"
-# depth is inferred from color path; override with:
-# depth = "/path/to/custom.depth16.png"
-```
-
-### Tracking modes
-
-**pointer** (default): Uses Wayland pointer events. Works on any wlr-layer-shell compositor. Parallax only active when the cursor is over visible desktop. Stops rendering entirely when the cursor is over a window, which is good for battery.
-
-**hyprland**: Polls the Hyprland IPC socket for global cursor position. Parallax stays active even when windows cover the desktop. Hyprland-only. Note that this lets the daemon observe cursor position over arbitrary windows.
-
-## Supported compositors
-
-Requires [wlr-layer-shell](https://wayland.app/protocols/wlr-layer-shell-unstable-v1). Tested compositors:
-
-- Hyprland
-- Sway
-- River
-- Wayfire
-- niri
-- labwc
-
-GNOME and KDE Plasma do not implement wlr-layer-shell and are not supported.
+Only tested on Hyprland so far. It should work on other compositors with wlr-layer-shell, such as Sway, River, Wayfire, niri and labwc. GNOME and KDE Plasma don't support it.
 
 ## License
 

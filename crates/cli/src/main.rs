@@ -34,9 +34,8 @@ enum Command {
     ///
     /// Runs Depth Anything inference on the source image and writes a
     /// pair of files (`<hash>.color.png` and `<hash>.depth16.png`) to
-    /// the cache directory or the directory specified by --out. Existing
-    /// baked pairs for the same source content are reused — re-baking
-    /// is essentially free.
+    /// the cache directory or the directory specified by --out. Baking
+    /// the same image again reuses the existing pair.
     Bake {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
@@ -52,9 +51,9 @@ enum Command {
 
     /// Bake an image and set it as the active wallpaper.
     ///
-    /// Performs the same baking as `bake`, then updates the daemon's
-    /// config.toml so the next daemon start uses this wallpaper. The
-    /// resolved model path is also persisted to [inference] so future
+    /// Performs the same baking as `bake`, then points the daemon's
+    /// config.toml at it. Reload the daemon to show it. The resolved
+    /// model path is also persisted to [inference] so future
     /// invocations don't need --model.
     Set {
         /// Source image (jpeg, png, or webp).
@@ -70,10 +69,12 @@ enum Command {
     ///
     /// Downloads Depth Anything V2 Small (ONNX) from the onnx-community
     /// repository to ~/.local/share/shiftpaper/models/ and writes the path
-    /// to [inference] model_path in config.toml. Safe to re-run — skips
-    /// the download if the file already exists unless --force is given.
+    /// to [inference] model_path in config.toml. Safe to re-run: the
+    /// download is skipped if the file already exists, unless --force
+    /// is given.
     FetchModel {
-        /// Override the download URL. Defaults to the canonical HuggingFace release.
+        /// Override the download URL. Defaults to the onnx-community
+        /// release on HuggingFace.
         #[arg(long)]
         url: Option<String>,
         /// Re-download even if the file already exists.
@@ -84,9 +85,9 @@ enum Command {
     /// Show or change the cursor tracking mode.
     ///
     /// Pointer mode (the default) uses Wayland's native pointer events.
-    /// It works on any wlr-layer-shell compositor and is event-driven —
-    /// the daemon stops rendering entirely when the cursor isn't over
-    /// visible desktop, which saves significant battery.
+    /// It works on any wlr-layer-shell compositor, and the daemon only
+    /// draws while the cursor is over visible desktop, which saves
+    /// battery.
     ///
     /// Hyprland mode reads the global cursor position from the Hyprland
     /// IPC socket. Parallax remains responsive even when windows cover

@@ -24,7 +24,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # The CLI uses the default ORT_STRATEGY=download — ort-sys fetches
+      # The CLI uses the default ORT_STRATEGY=download. ort-sys fetches
       # libonnxruntime at build time and links it statically, producing a
       # self-contained binary that doesn't need onnxruntime installed.
       - name: Build CLI (with ONNX Runtime bundled)
