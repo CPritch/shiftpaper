@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm,
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    delegate_registry,
     output::{OutputHandler, OutputInfo as SctkOutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -358,7 +357,7 @@ impl App {
         o.needs_redraw = false;
 
         let surface = o.layer_surface.wl_surface();
-        surface.frame(qh, surface.clone());
+        surface.frame(qh, FrameCallbackData(surface.clone()));
         o.frame_pending = true;
         if !renderer.render_frame(rt) {
             // Nothing was presented. Commit anyway so the frame callback
@@ -798,13 +797,10 @@ impl ProvidesRegistryState for App {
     registry_handlers!(OutputState, SeatState);
 }
 
-delegate_compositor!(App);
-delegate_output!(App);
-delegate_layer!(App);
-delegate_seat!(App);
-delegate_pointer!(App);
 delegate_registry!(App);
-delegate_shm!(App);
+// Routes events for every toolkit-managed object (outputs, seats, layer
+// surfaces and so on) to the handler traits implemented above.
+smithay_client_toolkit::delegate_dispatch2!(App);
 
 impl Dispatch<WpFractionalScaleV1, ()> for App {
     fn event(

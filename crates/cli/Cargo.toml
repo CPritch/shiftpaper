@@ -29,10 +29,10 @@ libloading = { version = "0.9", optional = true }
 blake3 = "1"
 
 clap = { version = "4", features = ["derive", "env"] }
-toml_edit = "0.22"
-directories = "5"
+toml_edit = "0.25"
+directories = "6"
 ureq = "3"
-indicatif = "0.17"
+indicatif = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

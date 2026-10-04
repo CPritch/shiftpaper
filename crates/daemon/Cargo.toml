@@ -10,7 +10,7 @@ name = "shiftpaperd"
 path = "src/main.rs"
 
 [dependencies]
-smithay-client-toolkit = { version = "0.20", features = ["calloop"] }
+smithay-client-toolkit = { version = "0.21", features = ["calloop"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
@@ -31,8 +31,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 anyhow = { workspace = true }
-nix = { version = "0.29", features = ["signal"] }
-pollster = "0.4.0"
+nix = { version = "0.31", features = ["signal"] }
+pollster = "1"
 
 [dev-dependencies]
 # Same version wgpu uses internally, to validate shader.wgsl in tests.
