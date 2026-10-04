@@ -1,7 +1,9 @@
+use crate::depth::{DepthMap, RANK_POINTS, load_depth_map};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use std::path::Path;
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 use wgpu::CurrentSurfaceTexture;
 use wgpu::util::DeviceExt;
 
@@ -12,41 +14,190 @@ use wgpu::util::DeviceExt;
 struct Uniforms {
     cursor_offset: [f32; 2],
     intensity: f32,
-    _pad: f32,
+    progress: f32,
     uv_scale: [f32; 2],
+    next_uv_scale: [f32; 2],
+    near_first: f32,
+    _pad: f32,
+}
+
+/// A wallpaper's images decoded into memory, ready to upload. Decoding is
+/// the slow part, so it can happen off the main thread.
+pub struct DecodedWallpaper {
+    color: image::RgbaImage,
+    /// None if the depth map couldn't be loaded, so the wallpaper still
+    /// shows, just without parallax.
+    depth: Option<DepthMap>,
+    /// From `DepthMap::ranks`, for ordering transitions.
+    ranks: Vec<f32>,
+}
+
+impl DecodedWallpaper {
+    pub fn load(color: &Path, depth: &Path) -> Result<Self> {
+        let color = image::open(color)
+            .with_context(|| format!("failed to load image: {}", color.display()))?
+            .to_rgba8();
+        let depth = match load_depth_map(depth) {
+            Ok(map) => Some(map),
+            Err(e) => {
+                warn!("using a flat depth map: {e:#}");
+                None
+            }
+        };
+        // A flat wallpaper is all one depth, so it changes all at once,
+        // halfway through a transition.
+        let ranks = depth
+            .as_ref()
+            .map_or_else(|| vec![0.5; RANK_POINTS], DepthMap::ranks);
+        Ok(Self {
+            color,
+            depth,
+            ranks,
+        })
+    }
+}
+
+/// A wallpaper's textures on the GPU. Cloning shares the textures, so
+/// outputs showing the same wallpaper upload it once.
+#[derive(Clone)]
+pub struct Wallpaper {
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    ranks: wgpu::TextureView,
+    /// Image size in pixels, for cropping to the screen's aspect ratio.
+    size: (u32, u32),
+}
+
+/// A depth-ordered transition to another wallpaper.
+struct Transition {
+    next: Wallpaper,
+    start: Instant,
+    duration: Duration,
+    near_first: bool,
+    /// Frames drawn so far, logged at the end to show how smooth it was.
+    frames: u32,
 }
 
 pub struct OutputRenderState {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
-    pub bind_group: wgpu::BindGroup,
-    pub color_view: wgpu::TextureView,
-    /// Wallpaper size in pixels, for cropping to the screen's aspect ratio.
-    pub image_size: (u32, u32),
-    pub uniform_buffer: wgpu::Buffer,
-    pub current_offset: (f32, f32),
+    bind_group: wgpu::BindGroup,
+    current: Wallpaper,
+    transition: Option<Transition>,
+    uniform_buffer: wgpu::Buffer,
+    current_offset: (f32, f32),
     pub target_offset: (f32, f32),
 }
 
 impl OutputRenderState {
+    pub fn new(
+        renderer: &Renderer,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+        wallpaper: Wallpaper,
+    ) -> Self {
+        let uniform_buffer = renderer.create_uniform_buffer();
+        let bind_group = renderer.create_bind_group(&wallpaper, &wallpaper, &uniform_buffer);
+        Self {
+            surface,
+            config,
+            bind_group,
+            current: wallpaper,
+            transition: None,
+            uniform_buffer,
+            current_offset: (0.0, 0.0),
+            target_offset: (0.0, 0.0),
+        }
+    }
+
+    /// Show a wallpaper straight away, cancelling any transition.
+    pub fn set_wallpaper(&mut self, renderer: &Renderer, wallpaper: Wallpaper) {
+        self.transition = None;
+        self.bind_group = renderer.create_bind_group(&wallpaper, &wallpaper, &self.uniform_buffer);
+        self.current = wallpaper;
+    }
+
+    /// Start a depth-ordered transition to `next`. A transition that is
+    /// already running skips to its end first.
+    pub fn start_transition(
+        &mut self,
+        renderer: &Renderer,
+        next: Wallpaper,
+        duration: Duration,
+        near_first: bool,
+    ) {
+        if let Some(running) = self.transition.take() {
+            self.current = running.next;
+        }
+        self.bind_group = renderer.create_bind_group(&self.current, &next, &self.uniform_buffer);
+        self.transition = Some(Transition {
+            next,
+            start: Instant::now(),
+            duration,
+            near_first,
+            frames: 0,
+        });
+    }
+
+    /// Once a transition has run its course, make its wallpaper the current
+    /// one. Call after drawing, so the final frame of the transition has
+    /// been shown.
+    pub fn finish_transition_if_done(&mut self, renderer: &Renderer) {
+        let done = self
+            .transition
+            .as_ref()
+            .is_some_and(|t| t.start.elapsed() >= t.duration);
+        if done && let Some(finished) = self.transition.take() {
+            debug!(frames = finished.frames, "transition finished");
+            self.set_wallpaper(renderer, finished.next);
+        }
+    }
+
     /// Step the lerp 30% of the way toward target_offset and write the new
-    /// uniform value. Returns whether the offset moved, so callers can skip
-    /// redrawing once it has settled.
+    /// uniforms. Returns whether anything changed, so callers can skip
+    /// redrawing once the offset has settled and no transition is running.
     pub fn step_and_write(&mut self, queue: &wgpu::Queue, intensity: f32) -> bool {
         let (tx, ty) = self.target_offset;
         let (cx, cy) = self.current_offset;
         let nx = cx + (tx - cx) * 0.3;
         let ny = cy + (ty - cy) * 0.3;
         self.current_offset = (nx, ny);
+
+        let screen = (self.config.width, self.config.height);
+        let (progress, next, near_first) = match &mut self.transition {
+            Some(t) => {
+                t.frames += 1;
+                (
+                    transition_progress(t.start.elapsed(), t.duration),
+                    &t.next,
+                    t.near_first,
+                )
+            }
+            None => (0.0, &self.current, true),
+        };
         let uniforms = Uniforms {
             cursor_offset: [nx, ny],
             intensity,
+            progress,
+            uv_scale: cover_uv_scale(self.current.size, screen),
+            next_uv_scale: cover_uv_scale(next.size, screen),
+            near_first: if near_first { 1.0 } else { 0.0 },
             _pad: 0.0,
-            uv_scale: cover_uv_scale(self.image_size, (self.config.width, self.config.height)),
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-        (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5
+        let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
+        moved || self.transition.is_some()
     }
+}
+
+/// How far through a transition we are, eased in and out so the sweep
+/// starts and settles gently. Reaches exactly 1 once `duration` has passed.
+fn transition_progress(elapsed: Duration, duration: Duration) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    let t = (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// How much of the image to show on each axis so it fills a screen of a
@@ -140,6 +291,48 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // The wallpaper being transitioned to: color, then depth.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Depth ranks for ordering transitions: current, then next.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -220,10 +413,47 @@ impl Renderer {
             })
     }
 
-    pub fn upload_depth_map(
-        &self,
-        depth: &crate::depth::DepthMap,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+    /// Load a baked wallpaper from disk onto the GPU.
+    pub fn load_wallpaper(&self, color: &Path, depth: &Path) -> Result<Wallpaper> {
+        Ok(self.upload_wallpaper(&DecodedWallpaper::load(color, depth)?))
+    }
+
+    pub fn upload_wallpaper(&self, decoded: &DecodedWallpaper) -> Wallpaper {
+        Wallpaper {
+            color: self.upload_color(&decoded.color),
+            depth: match &decoded.depth {
+                Some(map) => self.upload_depth_map(map),
+                None => self.depth_view.clone(),
+            },
+            ranks: self.upload_ranks(&decoded.ranks),
+            size: decoded.color.dimensions(),
+        }
+    }
+
+    fn upload_ranks(&self, ranks: &[f32]) -> wgpu::TextureView {
+        let texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("depth_ranks"),
+                size: wgpu::Extent3d {
+                    width: ranks.len() as u32,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D1,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(ranks),
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn upload_depth_map(&self, depth: &DepthMap) -> wgpu::TextureView {
         let size = wgpu::Extent3d {
             width: depth.width,
             height: depth.height,
@@ -257,19 +487,20 @@ impl Renderer {
             size,
         );
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         debug!(
             w = depth.width,
             h = depth.height,
             "uploaded depth map to GPU"
         );
-        (texture, view)
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub fn create_bind_group(
+    /// Bind the current wallpaper and the one being transitioned to, which
+    /// is the same wallpaper when there's no transition.
+    fn create_bind_group(
         &self,
-        color_view: &wgpu::TextureView,
-        depth_view: &wgpu::TextureView,
+        current: &Wallpaper,
+        next: &Wallpaper,
         uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -278,7 +509,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(color_view),
+                    resource: wgpu::BindingResource::TextureView(&current.color),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -286,22 +517,33 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
+                    resource: wgpu::BindingResource::TextureView(&current.depth),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: uniform_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&next.color),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&next.depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&current.ranks),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&next.ranks),
+                },
             ],
         })
     }
 
-    /// Upload the wallpaper image. Returns its view and size in pixels.
-    pub fn load_wallpaper_texture(&self, path: &Path) -> Result<(wgpu::TextureView, (u32, u32))> {
-        let img = image::open(path)
-            .with_context(|| format!("failed to load image: {}", path.display()))?
-            .to_rgba8();
-
+    fn upload_color(&self, img: &image::RgbaImage) -> wgpu::TextureView {
         let (w, h) = img.dimensions();
 
         let size = wgpu::Extent3d {
@@ -328,7 +570,7 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &img,
+            img,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * w),
@@ -336,11 +578,7 @@ impl Renderer {
             },
             size,
         );
-
-        Ok((
-            texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            (w, h),
-        ))
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     /// Draw and present one frame. Returns false if nothing was presented,
@@ -459,6 +697,22 @@ mod tests {
     #[test]
     fn taller_image_is_cropped_vertically() {
         assert_close(cover_uv_scale((1000, 2000), (2000, 1000)), [1.0, 0.25]);
+    }
+
+    #[test]
+    fn transitions_ease_from_zero_to_one() {
+        let second = Duration::from_secs(1);
+        assert_eq!(transition_progress(Duration::ZERO, second), 0.0);
+        assert_eq!(transition_progress(second / 2, second), 0.5);
+        assert_eq!(transition_progress(second, second), 1.0);
+        assert_eq!(transition_progress(second * 2, second), 1.0);
+        // Eased, so it starts slower than linear.
+        assert!(transition_progress(second / 10, second) < 0.1);
+    }
+
+    #[test]
+    fn zero_length_transitions_finish_at_once() {
+        assert_eq!(transition_progress(Duration::ZERO, Duration::ZERO), 1.0);
     }
 
     #[test]

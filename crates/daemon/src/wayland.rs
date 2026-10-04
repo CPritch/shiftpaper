@@ -21,6 +21,7 @@ use smithay_client_toolkit::{
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
@@ -36,11 +37,11 @@ use wayland_protocols::wp::{
 };
 
 use crate::cursor::HyprlandCursor;
-use crate::renderer::{OutputRenderState, Renderer};
+use crate::renderer::{OutputRenderState, Renderer, Wallpaper};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use shiftpaper_config::{Config, TrackingMode};
+use shiftpaper_config::{Config, TrackingMode, Transition};
 
 pub struct OutputInfo {
     pub name: String,
@@ -226,48 +227,16 @@ impl App {
             }
         };
 
+        let (duration, near_first) = transition_settings(&new_cfg);
         for output in &self.outputs {
             if !output.configured {
                 continue;
             }
             if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let (Some(color_path), Some(depth_path)) = (
-                    new_cfg.color_for(&output.name),
-                    new_cfg.depth_for(&output.name),
-                ) else {
-                    warn!(
-                        name = output.name,
-                        "reload: no wallpaper set for this output"
-                    );
+                let Some(wallpaper) = load_wallpaper_for(renderer, &new_cfg, &output.name) else {
                     continue;
                 };
-
-                let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(name = output.name, "reload: failed to load color: {e:#}");
-                        continue;
-                    }
-                };
-
-                let bind_group = match crate::depth::load_depth_map(&depth_path) {
-                    Ok(depth) => {
-                        let (_tex, view) = renderer.upload_depth_map(&depth);
-                        renderer.create_bind_group(&color_view, &view, &rt.uniform_buffer)
-                    }
-                    Err(e) => {
-                        warn!(name = output.name, "reload: failed to load depth: {e:#}");
-                        renderer.create_bind_group(
-                            &color_view,
-                            &renderer.depth_view,
-                            &rt.uniform_buffer,
-                        )
-                    }
-                };
-
-                rt.color_view = color_view;
-                rt.image_size = image_size;
-                rt.bind_group = bind_group;
+                rt.start_transition(renderer, wallpaper, duration, near_first);
                 info!(name = output.name, "reloaded wallpaper");
             }
         }
@@ -365,6 +334,7 @@ impl App {
             surface.commit();
             o.needs_redraw = true;
         }
+        rt.finish_transition_if_done(renderer);
     }
 
     fn create_layer_surface(
@@ -387,6 +357,32 @@ impl App {
         layer_surface.commit();
         layer_surface
     }
+}
+
+/// Load what an output should show: its own wallpaper or the global one.
+/// Logs why if there's nothing to show.
+fn load_wallpaper_for(
+    renderer: &Renderer,
+    config: &Config,
+    output_name: &str,
+) -> Option<Wallpaper> {
+    let (Some(color), Some(depth)) = (config.color_for(output_name), config.depth_for(output_name))
+    else {
+        warn!(name = output_name, "no wallpaper set for this output");
+        return None;
+    };
+    renderer
+        .load_wallpaper(color, &depth)
+        .inspect_err(|e| warn!(name = output_name, "{e:#}"))
+        .ok()
+}
+
+/// How long a change of wallpaper takes, and whether near things go first.
+fn transition_settings(config: &Config) -> (Duration, bool) {
+    (
+        Duration::from_secs_f32(config.daemon.transition_secs),
+        config.daemon.transition == Transition::NearFirst,
+    )
 }
 
 impl CompositorHandler for App {
@@ -623,56 +619,10 @@ impl LayerShellHandler for App {
 
             surface.configure(&renderer.device, &surface_config);
 
-            let (Some(color_path), Some(depth_path)) = (
-                self.config.color_for(&output_name),
-                self.config.depth_for(&output_name),
-            ) else {
-                warn!(name = output_name, "no wallpaper set for this output");
+            let Some(wallpaper) = load_wallpaper_for(renderer, &self.config, &output_name) else {
                 return;
             };
-
-            let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("failed to load color texture: {e:#}");
-                    return;
-                }
-            };
-
-            let uniform_buffer = renderer.create_uniform_buffer();
-
-            let bind_group = match crate::depth::load_depth_map(&depth_path) {
-                Ok(depth) => {
-                    let (_tex, view) = renderer.upload_depth_map(&depth);
-                    info!(
-                        name = output_name,
-                        w = depth.width,
-                        h = depth.height,
-                        path = %depth_path.display(),
-                        "depth map loaded"
-                    );
-                    renderer.create_bind_group(&color_view, &view, &uniform_buffer)
-                }
-                Err(e) => {
-                    warn!(
-                        path = %depth_path.display(),
-                        "failed to load depth map, using flat placeholder: {e:#}"
-                    );
-                    renderer.create_bind_group(&color_view, &renderer.depth_view, &uniform_buffer)
-                }
-            };
-
-            let render_state = OutputRenderState {
-                surface,
-                config: surface_config,
-                bind_group,
-                color_view,
-                image_size,
-                uniform_buffer,
-                current_offset: (0.0, 0.0),
-                target_offset: (0.0, 0.0),
-            };
-
+            let render_state = OutputRenderState::new(renderer, surface, surface_config, wallpaper);
             self.render_targets
                 .insert(output_name.clone(), render_state);
             info!(
