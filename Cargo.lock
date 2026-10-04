@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "shiftpaper-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1681,6 +1681,7 @@ dependencies = [
  "directories",
  "image",
  "indicatif",
+ "libloading 0.9.0",
  "ort",
  "shiftpaper-config",
  "tempfile",
@@ -1692,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "shiftpaper-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1702,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "shiftpaper-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
