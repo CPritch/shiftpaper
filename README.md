@@ -1,8 +1,12 @@
 # shiftpaper
 
+[![CI](https://github.com/CPritch/shiftpaper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CPritch/shiftpaper/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/CPritch/shiftpaper)](https://github.com/CPritch/shiftpaper/releases/latest)
+[![AUR](https://img.shields.io/aur/version/shiftpaper)](https://aur.archlinux.org/packages/shiftpaper)
+[![License: MIT](https://img.shields.io/github/license/CPritch/shiftpaper)](LICENSE)
+
 Parallax wallpaper daemon for Wayland. Uses monocular depth estimation to generate a depth map from any image, then shifts the wallpaper layers based on cursor position. The effect is subtle but satisfying.
 
-Experimental. Built and tested on a single machine (Arch, Hyprland, RTX 5060). Expect rough edges.
 
 ![Example Tiger Wallpaper](header.gif)
 
@@ -30,6 +34,8 @@ Arch Linux (AUR):
 ```
 paru -S shiftpaper        # or yay, pikaur, etc.
 ```
+
+`shiftpaper-git` tracks the latest `main` instead.
 
 From source:
 
