@@ -10,7 +10,9 @@ name = "shiftpaperd"
 path = "src/main.rs"
 
 [dependencies]
-smithay-client-toolkit = { version = "0.21", features = ["calloop"] }
+# No keyboard handling is needed, so skip the default xkbcommon feature,
+# which would require libxkbcommon at build time.
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
