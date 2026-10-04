@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm,
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    delegate_registry,
     output::{OutputHandler, OutputInfo as SctkOutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -358,7 +357,7 @@ impl App {
         o.needs_redraw = false;
 
         let surface = o.layer_surface.wl_surface();
-        surface.frame(qh, surface.clone());
+        surface.frame(qh, FrameCallbackData(surface.clone()));
         o.frame_pending = true;
         if !renderer.render_frame(rt) {
             // Nothing was presented. Commit anyway so the frame callback
@@ -588,7 +587,7 @@ impl LayerShellHandler for App {
                 WaylandWindowHandle::new(NonNull::new(surface_ptr).expect("null surface ptr"));
 
             let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: RawDisplayHandle::Wayland(display_handle),
+                raw_display_handle: Some(RawDisplayHandle::Wayland(display_handle)),
                 raw_window_handle: RawWindowHandle::Wayland(window_handle),
             };
 
@@ -619,6 +618,7 @@ impl LayerShellHandler for App {
                 alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             };
 
             surface.configure(&renderer.device, &surface_config);
@@ -797,13 +797,10 @@ impl ProvidesRegistryState for App {
     registry_handlers!(OutputState, SeatState);
 }
 
-delegate_compositor!(App);
-delegate_output!(App);
-delegate_layer!(App);
-delegate_seat!(App);
-delegate_pointer!(App);
 delegate_registry!(App);
-delegate_shm!(App);
+// Routes events for every toolkit-managed object (outputs, seats, layer
+// surfaces and so on) to the handler traits implemented above.
+smithay_client_toolkit::delegate_dispatch2!(App);
 
 impl Dispatch<WpFractionalScaleV1, ()> for App {
     fn event(

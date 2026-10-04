@@ -12,5 +12,5 @@ clap = ["dep:clap"]
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
-toml = "0.8"
+toml = "1"
 clap = { version = "4", features = ["derive"], optional = true }
