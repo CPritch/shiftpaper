@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-04
 
 ### Added
 
@@ -18,6 +18,7 @@
 
 - Depth Anything V3 output was flipped instead of converted to disparity, which flattened the foreground and pulled the sky forward.
 - Baking the same image with a different model reused the first model's depth map.
+- The AUR package failed to build on systems without libxkbcommon.
 
 ## 0.2.0 - 2026-10-04
 

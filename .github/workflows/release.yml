@@ -50,19 +50,86 @@ jobs:
           body: |
             ## Installation
 
+            ### Arch Linux
+            ```bash
+            paru -S shiftpaper
+            ```
+
             ### From tarball
+            The systemd unit runs `shiftpaperd` by name, and systemd only
+            looks in /usr/local/bin and /usr/bin, so install there.
             ```bash
             tar -xzf shiftpaper-${{ github.ref_name }}-x86_64-linux.tar.gz
-            install -Dm755 shiftpaper   ~/.local/bin/shiftpaper
-            install -Dm755 shiftpaperd  ~/.local/bin/shiftpaperd
+            sudo install -Dm755 shiftpaper  /usr/local/bin/shiftpaper
+            sudo install -Dm755 shiftpaperd /usr/local/bin/shiftpaperd
             install -Dm644 shiftpaperd.service ~/.config/systemd/user/shiftpaperd.service
             systemctl --user daemon-reload
             ```
 
             ### Quick start
             ```bash
-            shiftpaper fetch-model          # download default depth model
+            shiftpaper fetch-model          # download the default depth model
             shiftpaper set ~/Pictures/wallpaper.jpg
             systemctl --user enable --now shiftpaperd
             ```
+
+  aur:
+    name: Publish to the AUR
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, so builds happen as this user.
+      - name: Set up a build user
+        run: |
+          pacman -Syu --noconfirm --needed git openssh pacman-contrib
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          cp -r packaging/aur/shiftpaper /home/builder/pkg
+          chown -R builder: /home/builder/pkg
+
+      - name: Point the PKGBUILD at this release
+        working-directory: /home/builder/pkg
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sudo -u builder updpkgsums
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+
+      # Never publish a PKGBUILD that doesn't build and pass its tests.
+      - name: Test-build the package
+        working-directory: /home/builder/pkg
+        run: sudo -u builder makepkg --syncdeps --noconfirm
+
+      - name: Push to the AUR
+        working-directory: /home/builder/pkg
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          # ssh ignores $HOME in this container, so give it explicit paths.
+          keys=$(mktemp -d)
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$keys/aur"
+          chmod 600 "$keys/aur"
+          # Pinned host key. Its fingerprint, SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4,
+          # matches the one published on aur.archlinux.org.
+          echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' > "$keys/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $keys/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=$keys/known_hosts -o StrictHostKeyChecking=yes"
+
+          git clone ssh://aur@aur.archlinux.org/shiftpaper.git aur
+          cp PKGBUILD .SRCINFO aur/
+          cd aur
+          git config user.name "Charles Pritchard"
+          git config user.email "charlespritchard.work@gmail.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "The AUR already has this version."
+          else
+            git commit -m "Update to ${GITHUB_REF_NAME#v}"
+            git push origin master
+          fi
 

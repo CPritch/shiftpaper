@@ -1,5 +1,6 @@
 # Maintainer: Charles Pritchard <charlespritchard.work@gmail.com>
 pkgname=shiftpaper
+# pkgver and sha256sums are set by the release workflow on each tag.
 pkgver=0.2.0
 pkgrel=1
 pkgdesc="Parallax wallpaper daemon for Wayland with monocular depth estimation"
