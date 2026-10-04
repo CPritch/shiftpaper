@@ -48,6 +48,11 @@ pub struct OutputInfo {
     pub scale: i32,
     pub layer_surface: LayerSurface,
     pub configured: bool,
+    /// A frame callback is outstanding. Drawing waits for it, so each
+    /// output draws at most once per compositor frame.
+    pub frame_pending: bool,
+    /// Draw at the next opportunity even if the offset hasn't moved.
+    pub needs_redraw: bool,
 }
 
 impl OutputInfo {
@@ -219,33 +224,68 @@ impl App {
         }
     }
 
-    /// Hyprland-mode tick: read the global cursor position, step each
-    /// output's offset towards it, and redraw only the outputs that moved.
-    /// Not called in pointer mode (the timer source is not inserted).
+    /// Hyprland-mode tick: read the global cursor position and retarget
+    /// every output towards it. Not called in pointer mode (the timer
+    /// source is not inserted).
     pub fn tick(&mut self, qh: &QueueHandle<Self>) {
         if !self.render_allowed() {
             return;
         }
-        let (Some(cursor), Some(renderer)) = (&self.cursor, &self.renderer) else {
-            return;
-        };
-        let Some(pos) = cursor.position() else {
+        let Some(pos) = self.cursor.as_ref().and_then(|c| c.position()) else {
             return;
         };
 
-        for o in &self.outputs {
-            if !o.configured {
-                continue;
+        for idx in 0..self.outputs.len() {
+            let o = &self.outputs[idx];
+            if let Some(rt) = self.render_targets.get_mut(&o.name) {
+                rt.target_offset =
+                    crate::cursor::offset_from_centre(pos, o.x, o.y, o.width, o.height);
             }
-            let Some(rt) = self.render_targets.get_mut(&o.name) else {
-                continue;
-            };
-            rt.target_offset = crate::cursor::offset_from_centre(pos, o.x, o.y, o.width, o.height);
-            if rt.step_and_write(&renderer.queue, self.config.intensity_for(&o.name)) {
-                let surface = o.layer_surface.wl_surface();
-                surface.frame(qh, surface.clone());
-                renderer.render_frame(rt);
-            }
+            self.advance(qh, idx);
+        }
+    }
+
+    /// Force every output to redraw, e.g. after a config reload or resume.
+    pub fn redraw_all(&mut self, qh: &QueueHandle<Self>) {
+        for idx in 0..self.outputs.len() {
+            self.outputs[idx].needs_redraw = true;
+            self.advance(qh, idx);
+        }
+    }
+
+    /// Step an output's offset towards its target and draw it if it moved
+    /// or needs a redraw. Drawing requests a frame callback, and `frame()`
+    /// calls back in here when it arrives, so an output animates at the
+    /// display's refresh rate until it settles, then stops.
+    fn advance(&mut self, qh: &QueueHandle<Self>, idx: usize) {
+        if !self.render_allowed() {
+            return;
+        }
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let o = &mut self.outputs[idx];
+        if o.frame_pending {
+            return;
+        }
+        let Some(rt) = self.render_targets.get_mut(&o.name) else {
+            return;
+        };
+
+        let moved = rt.step_and_write(&renderer.queue, self.config.intensity_for(&o.name));
+        if !moved && !o.needs_redraw {
+            return;
+        }
+        o.needs_redraw = false;
+
+        let surface = o.layer_surface.wl_surface();
+        surface.frame(qh, surface.clone());
+        o.frame_pending = true;
+        if !renderer.render_frame(rt) {
+            // Nothing was presented. Commit anyway so the frame callback
+            // still arrives, and retry the draw then.
+            surface.commit();
+            o.needs_redraw = true;
         }
     }
 
@@ -269,52 +309,6 @@ impl App {
         layer_surface.commit();
         layer_surface
     }
-
-    pub fn render_all(&self, qh: &QueueHandle<Self>) {
-        if !self.render_allowed() {
-            return;
-        }
-        let renderer = match &self.renderer {
-            Some(r) => r,
-            None => return,
-        };
-
-        for output in &self.outputs {
-            if !output.configured {
-                continue;
-            }
-
-            if let Some(render_state) = self.render_targets.get(&output.name) {
-                let surface = output.layer_surface.wl_surface();
-                surface.frame(qh, surface.clone());
-                renderer.render_frame(render_state);
-            }
-        }
-    }
-
-    /// Render a single named output. Used by pointer mode to avoid
-    /// re-rendering monitors that didn't receive the cursor event.
-    pub fn render_output(&self, qh: &QueueHandle<Self>, output_name: &str) {
-        if !self.render_allowed() {
-            return;
-        }
-        let renderer = match &self.renderer {
-            Some(r) => r,
-            None => return,
-        };
-        let output = match self.outputs.iter().find(|o| o.name == output_name) {
-            Some(o) => o,
-            None => return,
-        };
-        if !output.configured {
-            return;
-        }
-        if let Some(rt) = self.render_targets.get(output_name) {
-            let surface = output.layer_surface.wl_surface();
-            surface.frame(qh, surface.clone());
-            renderer.render_frame(rt);
-        }
-    }
 }
 
 impl CompositorHandler for App {
@@ -337,13 +331,23 @@ impl CompositorHandler for App {
     ) {
     }
 
+    /// The compositor is ready for this surface's next frame.
     fn frame(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        let Some(idx) = self
+            .outputs
+            .iter()
+            .position(|o| o.layer_surface.wl_surface() == surface)
+        else {
+            return;
+        };
+        self.outputs[idx].frame_pending = false;
+        self.advance(qh, idx);
     }
 
     fn surface_enter(
@@ -388,6 +392,8 @@ impl OutputHandler for App {
             scale: 1,
             layer_surface: self.create_layer_surface(qh, &output),
             configured: false,
+            frame_pending: false,
+            needs_redraw: false,
         };
         if let Some(info) = self.output_state.info(&output) {
             o.refresh(&info);
@@ -576,9 +582,6 @@ impl LayerShellHandler for App {
                 h = output_h,
                 "output initialized"
             );
-
-            layer.wl_surface().frame(qh, layer.wl_surface().clone());
-            layer.wl_surface().commit();
         } else {
             if let Some(rt) = self.render_targets.get_mut(&output_name) {
                 rt.config.width = output_w;
@@ -595,7 +598,8 @@ impl LayerShellHandler for App {
 
         // Draw now rather than waiting for the next cursor movement, so a
         // newly plugged in or resized output never shows a blank or stale frame.
-        self.needs_render = true;
+        self.outputs[output_idx].needs_redraw = true;
+        self.advance(qh, output_idx);
     }
 }
 
@@ -660,29 +664,29 @@ impl PointerHandler for App {
         }
 
         for event in events {
-            let Some(o) = self
+            let Some(idx) = self
                 .outputs
                 .iter()
-                .find(|o| o.layer_surface.wl_surface() == &event.surface)
+                .position(|o| o.layer_surface.wl_surface() == &event.surface)
             else {
                 continue;
             };
+            let o = &self.outputs[idx];
 
             match event.kind {
                 PointerEventKind::Enter { .. } => debug!(name = o.name, "pointer entered"),
                 PointerEventKind::Leave { .. } => debug!(name = o.name, "pointer left"),
                 PointerEventKind::Motion { .. } => {
+                    // Only record where the cursor is. Drawing happens in
+                    // advance(), at most once per frame however fast the
+                    // mouse reports motion.
                     let (x, y) = event.position;
                     let target_x = x as f32 / o.width as f32 - 0.5;
                     let target_y = y as f32 / o.height as f32 - 0.5;
-                    let intensity = self.config.intensity_for(&o.name);
-                    if let (Some(renderer), Some(rt)) =
-                        (&self.renderer, self.render_targets.get_mut(&o.name))
-                    {
+                    if let Some(rt) = self.render_targets.get_mut(&o.name) {
                         rt.target_offset = (target_x, target_y);
-                        rt.step_and_write(&renderer.queue, intensity);
                     }
-                    self.render_output(qh, &o.name);
+                    self.advance(qh, idx);
                 }
                 _ => {}
             }
