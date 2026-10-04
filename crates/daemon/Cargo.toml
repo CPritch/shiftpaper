@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 smithay-client-toolkit = { version = "0.20", features = ["calloop"] }
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 
