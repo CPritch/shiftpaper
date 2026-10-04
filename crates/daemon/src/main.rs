@@ -87,7 +87,7 @@ fn main() -> Result<()> {
     match cfg.daemon.tracking_mode {
         config::TrackingMode::Hyprland => {
             info!("tracking mode: hyprland (IPC polling)");
-            app.init_cursor(cfg.daemon.cursor_poll_hz.get());
+            app.init_cursor();
         }
         config::TrackingMode::Pointer => {
             info!("tracking mode: pointer (Wayland-native, event-driven)");
