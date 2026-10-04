@@ -2,8 +2,8 @@
 //! `shiftpaper_config::Config::load`.
 
 use anyhow::{Context, Result};
-use std::path::Path;
-use toml_edit::{DocumentMut, Table};
+use std::path::{Path, PathBuf};
+use toml_edit::{Array, DocumentMut, Table};
 use tracing::info;
 
 /// Read config.toml, let `change` modify it, and write it back, keeping
@@ -19,6 +19,20 @@ pub fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut Table> 
         .or_insert(toml_edit::table())
         .as_table_mut()
         .with_context(|| format!("config [{name}] is not a table"))
+}
+
+/// A TOML array of paths, one per line.
+pub fn list(paths: &[PathBuf]) -> Array {
+    let mut array: Array = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    for item in array.iter_mut() {
+        item.decor_mut().set_prefix("\n    ");
+    }
+    array.set_trailing("\n");
+    array.set_trailing_comma(true);
+    array
 }
 
 fn edit_at(path: &Path, change: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
@@ -79,6 +93,16 @@ mod tests {
         let path = dir.path().join("config.toml");
         assert!(edit_at(&path, |_| anyhow::bail!("nope")).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn lists_put_one_path_per_line() {
+        let mut doc = DocumentMut::new();
+        doc["images"] = value(list(&[PathBuf::from("/a.png"), PathBuf::from("/b.png")]));
+        assert_eq!(
+            doc.to_string(),
+            "images = [\n    \"/a.png\",\n    \"/b.png\",\n]\n"
+        );
     }
 
     #[test]
