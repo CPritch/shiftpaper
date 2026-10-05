@@ -259,7 +259,9 @@ impl App {
     }
 
     /// Move the slideshow on once the next slide is due and loaded. Called
-    /// from the main loop, which wakes at least twice a second.
+    /// from the main loop, which wakes at least twice a second. It pauses
+    /// with rendering, so slides don't change while the session is idle or
+    /// the battery is low, and it catches up when rendering resumes.
     pub fn update_slideshow(&mut self, qh: &QueueHandle<Self>) {
         if !self.render_allowed() {
             return;

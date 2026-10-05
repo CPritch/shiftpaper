@@ -4,7 +4,7 @@
 
 ### Added
 
-- Slideshows. `shiftpaper slideshow` bakes a set of images, or folders of them, and the daemon moves through them on a timer.
+- Slideshows. `shiftpaper slideshow` bakes a set of images, or folders of them, and the daemon moves through them on a timer, in order or with `--shuffle`. They pause while idle or on low battery, and `shiftpaper slideshow --stop` keeps whichever image is showing.
 - Changing wallpaper morphs from one to the next through the depth of the scene, near things first, and the parallax carries on throughout. `transition = "far-first"` and `transition_secs` under `[daemon]` change how it plays.
 
 ### Changed
