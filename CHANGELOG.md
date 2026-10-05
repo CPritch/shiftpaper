@@ -17,6 +17,7 @@
 ### Changed
 
 - `set` and `slideshow` apply straight away: they tell a running shiftpaperd to reload, so there's no `systemctl --user reload` to run.
+- Changing wallpaper no longer freezes the parallax while a big image loads: it loads in the background, and only once however many monitors show it. Settings changes that don't change the wallpaper don't reload it.
 - Wallpapers much bigger than the screen are scaled down as they load. They draw several times faster and use far less memory.
 
 ## 0.3.0 - 2026-10-04

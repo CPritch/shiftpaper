@@ -125,7 +125,7 @@ pub struct WallpaperConfig {
     pub depth: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SlideshowConfig {
     /// Baked color images, shown in turn. Each one's depth map is found

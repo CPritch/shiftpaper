@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use image::imageops::{self, FilterType};
 use shiftpaper_config::Transition;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use wgpu::CurrentSurfaceTexture;
@@ -100,17 +100,21 @@ pub struct DecodedWallpaper {
     /// From `DepthMap::ranks` and `DepthMap::height_ranks`, for ordering
     /// transitions.
     ranks: Vec<[f32; 2]>,
+    files: WallpaperFiles,
 }
+
+/// The color and depth images a wallpaper is loaded from.
+pub type WallpaperFiles = (PathBuf, PathBuf);
 
 impl DecodedWallpaper {
     /// Load a baked wallpaper. If it's bigger than any of `screens` needs,
     /// it's scaled down, which makes every frame cheaper to draw and
     /// saves memory.
-    pub fn load(color: &Path, depth: &Path, screens: &[(u32, u32)]) -> Result<Self> {
-        let mut color = image::open(color)
-            .with_context(|| format!("failed to load image: {}", color.display()))?
+    pub fn load(color_path: &Path, depth_path: &Path, screens: &[(u32, u32)]) -> Result<Self> {
+        let mut color = image::open(color_path)
+            .with_context(|| format!("failed to load image: {}", color_path.display()))?
             .to_rgba8();
-        let mut depth = match load_depth_map(depth) {
+        let mut depth = match load_depth_map(depth_path) {
             Ok(map) => Some(map),
             Err(e) => {
                 warn!("using a flat depth map: {e:#}");
@@ -139,6 +143,7 @@ impl DecodedWallpaper {
             color,
             depth,
             ranks,
+            files: (color_path.to_path_buf(), depth_path.to_path_buf()),
         })
     }
 }
@@ -170,6 +175,7 @@ pub struct Wallpaper {
     ranks: wgpu::TextureView,
     /// Image size in pixels, for cropping to the screen's aspect ratio.
     size: (u32, u32),
+    pub files: WallpaperFiles,
 }
 
 /// A transition to another wallpaper that's under way.
@@ -212,6 +218,15 @@ impl OutputRenderState {
             uniform_buffer,
             current_offset: (0.0, 0.0),
             target_offset: (0.0, 0.0),
+        }
+    }
+
+    /// The wallpaper this output is showing, or changing to if a transition
+    /// is under way.
+    pub fn showing(&self) -> &Wallpaper {
+        match &self.transition {
+            Some(t) => &t.next,
+            None => &self.current,
         }
     }
 
@@ -560,6 +575,7 @@ impl Renderer {
             },
             ranks: self.upload_ranks(&decoded.ranks),
             size: decoded.color.dimensions(),
+            files: decoded.files.clone(),
         }
     }
 
