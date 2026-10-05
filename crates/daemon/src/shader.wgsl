@@ -63,11 +63,24 @@ const MORPH: u32 = 2u;
 const FLATTEN: u32 = 3u;
 const DISSOLVE: u32 = 4u;
 const PORTAL: u32 = 5u;
+const TIDE_IN: u32 = 6u;
+const TIDE_OUT: u32 = 7u;
 
 // The portal's settings, in screen heights. Must match renderer.rs.
 const TRAIL_POINTS: u32 = 32u;
 const PORTAL_DEPTH: f32 = 1.0;
 const PORTAL_EDGE: f32 = 0.04;
+
+// Where the tide takes the horizon to be, down the image, and how close a
+// depth of 0 is. Must match depth.rs.
+const HORIZON: f32 = 0.5;
+const TIDE_NEAR: f32 = 0.1;
+// Just under the tide's surface the water ripples and darkens a little.
+// How far down that goes, in height rank, how far the ripple moves the
+// picture, in screen heights, and how much darker it gets at the surface.
+const WATER_DEPTH: f32 = 0.15;
+const RIPPLE: f32 = 0.0025;
+const WATER_SHADE: f32 = 0.18;
 
 // Half the width of the slice of depth ranks that is part way through
 // switching at any moment. Narrower gives a crisper wavefront, wider a
@@ -149,6 +162,44 @@ fn blobs(screen_uv: vec2<f32>) -> f32 {
     return 0.7 * value_noise(p) + 0.3 * value_noise(p * 3.1 + 17.0);
 }
 
+// Roughly how high a point is in the scene, squashed into (-1, 1). Must
+// match tide_height in depth.rs, which explains it.
+fn tide_height(image_y: f32, depth: f32) -> f32 {
+    let distance = 1.0 / (depth + TIDE_NEAR);
+    let height = (HORIZON - image_y) * distance;
+    return height / (1.0 + abs(height));
+}
+
+// The fraction of a wallpaper's pixels lower in the scene than `height`,
+// from the second column of its ranks.
+fn height_rank(table: texture_1d<f32>, height: f32) -> f32 {
+    let x = clamp((height + 1.0) * 0.5, 0.0, 1.0) * 256.0;
+    let i = min(u32(x), 255u);
+    let lower = textureLoad(table, i, 0).g;
+    let next = textureLoad(table, i + 1u, 0).g;
+    return mix(lower, next, x - f32(i));
+}
+
+// How far under the tide's water a pixel is, in height rank, so negative
+// above it. Coming in, the new wallpaper rises like water over the old
+// one's ground, filling the lowest places first, lapping round whatever
+// stands out of it and reaching the sky last. Going out, the old wallpaper
+// drains off the new one's ground, uncovering its highest places first.
+// The water moves through height rank, like the sweeps through depth rank.
+fn under_water(uv: vec2<f32>, depth: f32, next_uv: vec2<f32>, next_depth: f32, t: f32) -> f32 {
+    let level = t * (1.0 + 2.0 * BAND) - BAND;
+    if u.style == TIDE_IN {
+        return level - height_rank(ranks, tide_height(uv.y, depth));
+    }
+    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv.y, next_depth));
+}
+
+// Small waves across the tide's surface, which move as it does.
+fn wave(screen_uv: vec2<f32>, t: f32) -> f32 {
+    return sin(screen_uv.x * 90.0 + t * 50.0)
+        + 0.5 * sin(screen_uv.x * 210.0 - t * 70.0 + screen_uv.y * 40.0);
+}
+
 // How far a pixel has switched in a portal. The new wallpaper grows like
 // a bubble in the scene from each point on the cursor's trail, so it
 // spreads across the surface under the cursor first and has to wrap round
@@ -173,37 +224,49 @@ fn portal_weight(screen_uv: vec2<f32>, rank: f32, t: f32) -> f32 {
 }
 
 // How far a pixel has changed into the next wallpaper, for its colour and
-// its depth separately, and how much depth the scene has right now.
+// its depth separately, and how much depth the scene has right now. For
+// the tide, also how close it is under the water's surface, from 0 to 1.
 struct Blend {
     color: f32,
     depth: f32,
     depth_scale: f32,
+    surface: f32,
 };
 
 fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -> Blend {
     if u.style == MORPH {
         // The shape of the scene leads and its colours follow, so it reads
         // as a morph rather than a crossfade.
-        return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 1.0);
+        return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 1.0, 0.0);
     }
     if u.style == FLATTEN {
         // Flat through the middle fifth, while the pictures swap over, so
         // the change of shape can't be seen.
         let flatness = smoothstep(0.0, 0.4, t) - smoothstep(0.6, 1.0, t);
-        return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness);
+        return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness, 0.0);
     }
     if u.style == DISSOLVE {
         // Half depth order, as in sweep-in, and half random blobs.
         let next_rank = depth_rank(next_ranks, next_depth);
         let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
-        return Blend(weight, weight, 1.0);
+        return Blend(weight, weight, 1.0, 0.0);
     }
     if u.style == PORTAL {
         let weight = portal_weight(screen_uv, depth_rank(ranks, depth), t);
-        return Blend(weight, weight, 1.0);
+        return Blend(weight, weight, 1.0, 0.0);
+    }
+    if u.style == TIDE_IN || u.style == TIDE_OUT {
+        let uv = crop(screen_uv, u.uv_scale);
+        let next_uv = crop(screen_uv, u.next_uv_scale);
+        let under = under_water(uv, depth, next_uv, next_depth, t);
+        // The new wallpaper shows under the water coming in, and above it
+        // going out.
+        let weight = smoothstep(-BAND, BAND, select(-under, under, u.style == TIDE_IN));
+        let surface = smoothstep(-0.02, 0.02, under) * (1.0 - smoothstep(0.0, WATER_DEPTH, under));
+        return Blend(weight, weight, 1.0, surface);
     }
     let weight = sweep_weight(depth, next_depth, t);
-    return Blend(weight, weight, 1.0);
+    return Blend(weight, weight, 1.0, 0.0);
 }
 
 // Linear sRGB to Oklab, from https://bottosson.github.io/posts/oklab/
@@ -268,7 +331,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // both images shift by it so they move together.
     depth = mix(depth, next_depth, blend.depth) * blend.depth_scale;
     let shift = u.cursor_offset * depth * u.intensity;
-    let color = textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
-    let next_color = textureSample(next_color_tex, tex_sampler, next_uv - shift * u.next_uv_scale);
-    return mix_oklab(color, next_color, blend.color);
+
+    // Under the tide's surface the water ripples and darkens a little. The
+    // water is the new wallpaper coming in and the old one going out.
+    let ripple = vec2<f32>(0.0, wave(in.uv, u.progress) * RIPPLE * blend.surface);
+    let shade = 1.0 - WATER_SHADE * blend.surface;
+    let old_is_water = u.style == TIDE_OUT;
+    let color = textureSample(
+        color_tex,
+        tex_sampler,
+        uv - shift * u.uv_scale + select(vec2<f32>(0.0), ripple, old_is_water),
+    );
+    let next_color = textureSample(
+        next_color_tex,
+        tex_sampler,
+        next_uv - shift * u.next_uv_scale + select(ripple, vec2<f32>(0.0), old_is_water),
+    );
+    return mix_oklab(
+        vec4<f32>(color.rgb * select(1.0, shade, old_is_water), color.a),
+        vec4<f32>(next_color.rgb * select(shade, 1.0, old_is_water), next_color.a),
+        blend.color,
+    );
 }

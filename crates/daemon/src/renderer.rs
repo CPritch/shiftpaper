@@ -94,8 +94,9 @@ pub struct DecodedWallpaper {
     /// None if the depth map couldn't be loaded, so the wallpaper still
     /// shows, just without parallax.
     depth: Option<DepthMap>,
-    /// From `DepthMap::ranks`, for ordering transitions.
-    ranks: Vec<f32>,
+    /// From `DepthMap::ranks` and `DepthMap::height_ranks`, for ordering
+    /// transitions.
+    ranks: Vec<[f32; 2]>,
 }
 
 impl DecodedWallpaper {
@@ -124,9 +125,13 @@ impl DecodedWallpaper {
         }
         // A flat wallpaper is all one depth, so it changes all at once,
         // halfway through a transition.
-        let ranks = depth
-            .as_ref()
-            .map_or_else(|| vec![0.5; RANK_POINTS], DepthMap::ranks);
+        let ranks = match &depth {
+            Some(map) => (map.ranks().into_iter())
+                .zip(map.height_ranks())
+                .map(|(depth, height)| [depth, height])
+                .collect(),
+            None => vec![[0.5, 0.5]; RANK_POINTS],
+        };
         Ok(Self {
             color,
             depth,
@@ -305,6 +310,8 @@ fn shader_style(style: Transition) -> u32 {
         Transition::Flatten => 3,
         Transition::Dissolve => 4,
         Transition::Portal => 5,
+        Transition::TideIn => 6,
+        Transition::TideOut => 7,
     }
 }
 
@@ -554,7 +561,7 @@ impl Renderer {
         }
     }
 
-    fn upload_ranks(&self, ranks: &[f32]) -> wgpu::TextureView {
+    fn upload_ranks(&self, ranks: &[[f32; 2]]) -> wgpu::TextureView {
         let texture = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -567,7 +574,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D1,
-                format: wgpu::TextureFormat::R32Float,
+                format: wgpu::TextureFormat::Rg32Float,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
@@ -833,6 +840,8 @@ mod tests {
             ("FLATTEN", Transition::Flatten),
             ("DISSOLVE", Transition::Dissolve),
             ("PORTAL", Transition::Portal),
+            ("TIDE_IN", Transition::TideIn),
+            ("TIDE_OUT", Transition::TideOut),
         ] {
             let line = format!("const {name}: u32 = {}u;", shader_style(style));
             assert!(src.contains(&line), "{line}");
@@ -879,6 +888,17 @@ mod tests {
             trail.follow([0.6 + 0.1 * i as f32, 0.5], 0.3, 1.0);
         }
         assert_eq!(trail.len, TRAIL_POINTS, "it stops when full");
+    }
+
+    #[test]
+    fn tide_constants_match_the_shader() {
+        let src = include_str!("shader.wgsl");
+        for line in [
+            format!("const HORIZON: f32 = {:?};", crate::depth::HORIZON),
+            format!("const TIDE_NEAR: f32 = {:?};", crate::depth::TIDE_NEAR),
+        ] {
+            assert!(src.contains(&line), "{line}");
+        }
     }
 
     #[test]

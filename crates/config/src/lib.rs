@@ -87,6 +87,12 @@ pub enum Transition {
     /// The new wallpaper grows out from the cursor like a bubble in the
     /// scene, following it if it moves.
     Portal,
+    /// The new wallpaper rises through the old like a tide coming in,
+    /// lowest places first.
+    TideIn,
+    /// The old wallpaper drains away like a tide going out, uncovering the
+    /// new one from the highest places down.
+    TideOut,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -524,6 +530,8 @@ mod tests {
             ("flatten", Transition::Flatten),
             ("dissolve", Transition::Dissolve),
             ("portal", Transition::Portal),
+            ("tide-in", Transition::TideIn),
+            ("tide-out", Transition::TideOut),
         ] {
             let cfg = parse(&format!("[daemon]\ntransition = \"{text}\""));
             assert_eq!(cfg.daemon.transition, transition);
