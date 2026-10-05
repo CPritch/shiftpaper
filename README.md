@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/icon/readme-dark.svg">
+  <img src="assets/icon/readme-light.svg" alt="shiftpaper icon" width="96">
+</picture>
+
 # shiftpaper
 
 [![CI](https://github.com/CPritch/shiftpaper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CPritch/shiftpaper/actions/workflows/ci.yml)
