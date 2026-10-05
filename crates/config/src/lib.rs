@@ -6,7 +6,9 @@ use serde::Deserialize;
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod shuffle;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +91,9 @@ pub struct SlideshowConfig {
     pub images: Vec<PathBuf>,
     #[serde(default = "default_interval")]
     pub interval_secs: NonZeroU32,
+    /// Show the images in a random order, different each time round.
+    #[serde(default)]
+    pub shuffle: bool,
 }
 
 fn default_interval() -> NonZeroU32 {
@@ -96,6 +101,21 @@ fn default_interval() -> NonZeroU32 {
 }
 
 impl SlideshowConfig {
+    /// Which slide to show at `now`. It's worked out from the clock rather
+    /// than counted, so the daemon carries on in step after a restart or a
+    /// sleep, and the CLI can tell which slide is showing.
+    pub fn due(&self, now: SystemTime) -> usize {
+        let len = self.images.len() as u64;
+        let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let step = secs / u64::from(self.interval_secs.get());
+        let position = (step % len) as usize;
+        if self.shuffle {
+            shuffle::order(step / len, self.images.len())[position]
+        } else {
+            position
+        }
+    }
+
     /// The color and depth images of the `index`th slide.
     pub fn slide(&self, index: usize) -> (&Path, PathBuf) {
         let color = &self.images[index];
@@ -522,6 +542,35 @@ mod tests {
             toml::from_str::<Config>("[slideshow]\nimages = [\"/a.png\"]\ninterval_secs = 0")
                 .is_err()
         );
+    }
+
+    fn slideshow(text: &str) -> SlideshowConfig {
+        parse(text).slideshow.unwrap()
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn slides_step_once_per_interval_and_wrap() {
+        let s = slideshow("[slideshow]\nimages = [\"/a\", \"/b\", \"/c\"]\ninterval_secs = 60");
+        let shown: Vec<usize> = [0, 59, 60, 150, 180].map(|t| s.due(at(t))).into();
+        assert_eq!(shown, [0, 0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn shuffled_slides_show_each_image_once_per_round() {
+        let s = slideshow(
+            "[slideshow]\nimages = [\"/a\", \"/b\", \"/c\", \"/d\"]\ninterval_secs = 10\nshuffle = true",
+        );
+        assert!(!slideshow("[slideshow]\nimages = [\"/a\"]").shuffle);
+        for round in 0..20 {
+            let start = round * 40;
+            let mut shown: Vec<usize> = (0..4).map(|i| s.due(at(start + i * 10))).collect();
+            shown.sort();
+            assert_eq!(shown, [0, 1, 2, 3], "round {round}");
+        }
     }
 
     #[test]

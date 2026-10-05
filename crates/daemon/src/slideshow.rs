@@ -4,7 +4,7 @@ use crate::renderer::{DecodedWallpaper, Renderer, Wallpaper};
 use anyhow::{Result, anyhow};
 use shiftpaper_config::SlideshowConfig;
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 use tracing::{info, warn};
 
 pub struct Slideshow {
@@ -34,11 +34,7 @@ impl Slideshow {
     pub fn current(&mut self, renderer: &Renderer, screens: &[(u32, u32)]) -> Option<Wallpaper> {
         if self.wallpaper.is_none() {
             let len = self.config.images.len();
-            let due = due_index(
-                SystemTime::now(),
-                self.config.interval_secs.get().into(),
-                len,
-            );
+            let due = self.config.due(SystemTime::now());
             for index in (due..len).chain(0..due) {
                 let (color, depth) = self.config.slide(index);
                 match renderer.load_wallpaper(color, &depth, screens) {
@@ -58,12 +54,7 @@ impl Slideshow {
     /// Check whether it's time for the next slide. Returns it once it's
     /// due and has finished loading in the background.
     pub fn poll(&mut self, renderer: &Renderer, screens: &[(u32, u32)]) -> Option<Wallpaper> {
-        let len = self.config.images.len();
-        let due = due_index(
-            SystemTime::now(),
-            self.config.interval_secs.get().into(),
-            len,
-        );
+        let due = self.config.due(SystemTime::now());
         if self.index == Some(due) {
             return None;
         }
@@ -106,37 +97,5 @@ impl Slideshow {
                 None
             }
         }
-    }
-}
-
-/// Which slide the clock says to show. Going by the time rather than
-/// counting from when the daemon started means a restart or a wake from
-/// sleep carries on where it should.
-fn due_index(now: SystemTime, interval_secs: u64, len: usize) -> usize {
-    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    (secs / interval_secs % len as u64) as usize
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn at(secs: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(secs)
-    }
-
-    #[test]
-    fn steps_once_per_interval() {
-        assert_eq!(due_index(at(0), 60, 3), 0);
-        assert_eq!(due_index(at(59), 60, 3), 0);
-        assert_eq!(due_index(at(60), 60, 3), 1);
-        assert_eq!(due_index(at(150), 60, 3), 2);
-    }
-
-    #[test]
-    fn wraps_around_to_the_first_slide() {
-        assert_eq!(due_index(at(180), 60, 3), 0);
-        assert_eq!(due_index(at(1_000_000), 60, 1), 0);
     }
 }
