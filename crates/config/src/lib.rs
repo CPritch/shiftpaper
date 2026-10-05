@@ -80,6 +80,9 @@ pub enum Transition {
     /// The old scene flattens into a picture, the pictures swap, and the
     /// new one fills out into 3D.
     Flatten,
+    /// Patches of the new wallpaper appear at random, nearer things
+    /// tending to go first.
+    Dissolve,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -514,6 +517,7 @@ mod tests {
             ("far-first", Transition::FarFirst),
             ("all-at-once", Transition::AllAtOnce),
             ("flatten", Transition::Flatten),
+            ("dissolve", Transition::Dissolve),
         ] {
             let cfg = parse(&format!("[daemon]\ntransition = \"{text}\""));
             assert_eq!(cfg.daemon.transition, transition);

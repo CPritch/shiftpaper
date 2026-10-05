@@ -40,7 +40,8 @@ struct Uniforms {
     next_uv_scale: vec2<f32>,
     // Which transition, one of the constants below.
     style: u32,
-    _pad: f32,
+    // The screen's width over its height.
+    aspect: f32,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
@@ -53,6 +54,7 @@ const NEAR_FIRST: u32 = 0u;
 const FAR_FIRST: u32 = 1u;
 const ALL_AT_ONCE: u32 = 2u;
 const FLATTEN: u32 = 3u;
+const DISSOLVE: u32 = 4u;
 
 // Half the width of the slice of depth ranks that is part way through
 // switching at any moment. Narrower gives a crisper wavefront, wider a
@@ -97,10 +99,41 @@ fn sweep_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
     let next_rank = depth_rank(next_ranks, next_depth);
     // How far the plane has to travel before this pixel switches.
     let distance = select(max(rank, next_rank), 1.0 - next_rank, u.style == NEAR_FIRST);
-    // The plane travels from -BAND to 1 + BAND, so every pixel starts at 0
-    // and ends at 1 whatever its depth.
+    return swept(distance, t);
+}
+
+// How far a pixel `distance` along has switched as a plane travels from 0
+// to 1 over the transition. It actually goes from -BAND to 1 + BAND, so
+// every pixel starts at 0 and ends at 1.
+fn swept(distance: f32, t: f32) -> f32 {
     let plane = t * (1.0 + 2.0 * BAND) - BAND;
     return 1.0 - smoothstep(plane - BAND, plane + BAND, distance);
+}
+
+// A pseudo-random number in [0, 1) for each pair of whole numbers.
+fn hash(p: vec2<u32>) -> f32 {
+    var h = p.x * 1664525u + p.y * 1013904223u;
+    h = (h ^ (h >> 16u)) * 0x7feb352du;
+    h = (h ^ (h >> 15u)) * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return f32(h) / 4294967296.0;
+}
+
+// Smooth noise: a random value at each whole number, blended in between.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let cell = vec2<u32>(floor(p));
+    let f = fract(p);
+    let s = f * f * (3.0 - 2.0 * f);
+    let below = mix(hash(cell), hash(cell + vec2<u32>(1u, 0u)), s.x);
+    let above = mix(hash(cell + vec2<u32>(0u, 1u)), hash(cell + vec2<u32>(1u, 1u)), s.x);
+    return mix(below, above, s.y);
+}
+
+// Soft blobs, about six to the screen's height, with finer detail at
+// their edges.
+fn blobs(screen_uv: vec2<f32>) -> f32 {
+    let p = vec2<f32>(screen_uv.x * u.aspect, screen_uv.y) * 6.0;
+    return 0.7 * value_noise(p) + 0.3 * value_noise(p * 3.1 + 17.0);
 }
 
 // How far a pixel has changed into the next wallpaper, for its colour and
@@ -111,7 +144,7 @@ struct Blend {
     depth_scale: f32,
 };
 
-fn transition_blend(depth: f32, next_depth: f32, t: f32) -> Blend {
+fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -> Blend {
     if u.style == ALL_AT_ONCE {
         // The shape of the scene leads and its colours follow, so it reads
         // as a morph rather than a crossfade.
@@ -122,6 +155,12 @@ fn transition_blend(depth: f32, next_depth: f32, t: f32) -> Blend {
         // the change of shape can't be seen.
         let flatness = smoothstep(0.0, 0.4, t) - smoothstep(0.6, 1.0, t);
         return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness);
+    }
+    if u.style == DISSOLVE {
+        // Half depth order, near first, and half random blobs.
+        let next_rank = depth_rank(next_ranks, next_depth);
+        let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
+        return Blend(weight, weight, 1.0);
     }
     let weight = sweep_weight(depth, next_depth, t);
     return Blend(weight, weight, 1.0);
@@ -184,7 +223,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let next_uv = crop(in.uv, u.next_uv_scale);
     let next_depth = load_depth(next_depth_tex, next_uv);
-    let blend = transition_blend(depth, next_depth, u.progress);
+    let blend = transition_blend(in.uv, depth, next_depth, u.progress);
     // Blending depth as well as colour morphs the parallax geometry, and
     // both images shift by it so they move together.
     depth = mix(depth, next_depth, blend.depth) * blend.depth_scale;

@@ -21,7 +21,8 @@ struct Uniforms {
     next_uv_scale: [f32; 2],
     /// From `shader_style`.
     style: u32,
-    _pad: f32,
+    /// The screen's width over its height.
+    aspect: f32,
 }
 
 /// How far the shader zooms in on each side. Must match MARGIN in
@@ -201,6 +202,7 @@ impl OutputRenderState {
         self.current_offset = (nx, ny);
 
         let screen = (self.config.width, self.config.height);
+        let aspect = screen.0 as f32 / screen.1 as f32;
         let (progress, next, style) = match &mut self.transition {
             Some(t) => {
                 t.frames += 1;
@@ -219,7 +221,7 @@ impl OutputRenderState {
             uv_scale: cover_uv_scale(self.current.size, screen),
             next_uv_scale: cover_uv_scale(next.size, screen),
             style: shader_style(style),
-            _pad: 0.0,
+            aspect,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
@@ -235,6 +237,7 @@ fn shader_style(style: Transition) -> u32 {
         Transition::FarFirst => 1,
         Transition::AllAtOnce => 2,
         Transition::Flatten => 3,
+        Transition::Dissolve => 4,
     }
 }
 
@@ -761,6 +764,7 @@ mod tests {
             ("FAR_FIRST", Transition::FarFirst),
             ("ALL_AT_ONCE", Transition::AllAtOnce),
             ("FLATTEN", Transition::Flatten),
+            ("DISSOLVE", Transition::Dissolve),
         ] {
             let line = format!("const {name}: u32 = {}u;", shader_style(style));
             assert!(src.contains(&line), "{line}");
