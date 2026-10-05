@@ -13,7 +13,9 @@
 Parallax wallpaper daemon for Wayland. Uses monocular depth estimation to generate a depth map from any image, then shifts the wallpaper layers based on cursor position. The effect is subtle but satisfying.
 
 
-![Example Tiger Wallpaper](header.gif)
+![A forest path, a beach of round stones and a rock face shifting with the cursor, and the transitions between them](assets/reel.avif)
+
+<sub>Photos by [Charles Black](https://commons.wikimedia.org/wiki/File:Rotting_leaves_on_a_forest_path_(Unsplash).jpg), [Zeny Rosalina](https://commons.wikimedia.org/wiki/File:Smooth_Round_Rocks_Ocean_(Unsplash).jpg) and [Lionello DelPiccolo](https://commons.wikimedia.org/wiki/File:Climbing_in_Golden_Gate_Canyon_(Unsplash).jpg), CC0 via Wikimedia Commons.</sub>
 
 ## How it works
 

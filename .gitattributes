@@ -1,5 +1,5 @@
 # Leave these out of the source tarballs GitHub generates for tags, which
 # the AUR package downloads.
-header.gif export-ignore
+assets/reel.avif export-ignore
 .github export-ignore
 packaging export-ignore
