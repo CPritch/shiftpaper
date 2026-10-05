@@ -9,7 +9,6 @@
   - `sweep-in` (the default): a wave sweeps into the scene, near things first.
   - `sweep-out`: the background goes first and the nearest things last.
   - `morph`: everything at once, the shape of the scene a little ahead of its colours.
-  - `flatten`: the old scene flattens into a picture and the new one fills out into 3D.
   - `dissolve`: patches appear at random, nearer things tending to go first.
   - `portal`: grows out from your cursor like a bubble in the scene, and follows it.
   - `tide-in`: rises like water, lowest places first.

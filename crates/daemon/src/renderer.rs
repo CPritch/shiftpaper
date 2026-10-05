@@ -310,11 +310,10 @@ fn shader_style(style: Transition) -> u32 {
         Transition::SweepIn => 0,
         Transition::SweepOut => 1,
         Transition::Morph => 2,
-        Transition::Flatten => 3,
-        Transition::Dissolve => 4,
-        Transition::Portal => 5,
-        Transition::TideIn => 6,
-        Transition::TideOut => 7,
+        Transition::Dissolve => 3,
+        Transition::Portal => 4,
+        Transition::TideIn => 5,
+        Transition::TideOut => 6,
     }
 }
 
@@ -840,7 +839,6 @@ mod tests {
             ("SWEEP_IN", Transition::SweepIn),
             ("SWEEP_OUT", Transition::SweepOut),
             ("MORPH", Transition::Morph),
-            ("FLATTEN", Transition::Flatten),
             ("DISSOLVE", Transition::Dissolve),
             ("PORTAL", Transition::Portal),
             ("TIDE_IN", Transition::TideIn),

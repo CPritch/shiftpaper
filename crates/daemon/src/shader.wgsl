@@ -61,11 +61,10 @@ const MARGIN: f32 = 0.025;
 const SWEEP_IN: u32 = 0u;
 const SWEEP_OUT: u32 = 1u;
 const MORPH: u32 = 2u;
-const FLATTEN: u32 = 3u;
-const DISSOLVE: u32 = 4u;
-const PORTAL: u32 = 5u;
-const TIDE_IN: u32 = 6u;
-const TIDE_OUT: u32 = 7u;
+const DISSOLVE: u32 = 3u;
+const PORTAL: u32 = 4u;
+const TIDE_IN: u32 = 5u;
+const TIDE_OUT: u32 = 6u;
 
 // The portal's settings, explained in renderer.rs. Must match it.
 const TRAIL_POINTS: u32 = 32u;
@@ -225,12 +224,11 @@ fn portal_weight(screen_uv: vec2<f32>, rank: f32, t: f32) -> f32 {
 }
 
 // How far a pixel has changed into the next wallpaper, for its colour and
-// its depth separately, and how much depth the scene has right now. For
-// the tide, also how close it is under the water's surface, from 0 to 1.
+// its depth separately. For the tide, also how close it is under the
+// water's surface, from 0 to 1.
 struct Blend {
     color: f32,
     depth: f32,
-    depth_scale: f32,
     surface: f32,
 };
 
@@ -238,23 +236,17 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
     if u.style == MORPH {
         // The shape of the scene leads and its colours follow, so it reads
         // as a morph rather than a crossfade.
-        return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 1.0, 0.0);
-    }
-    if u.style == FLATTEN {
-        // Flat through the middle fifth, while the pictures swap over, so
-        // the change of shape can't be seen.
-        let flatness = smoothstep(0.0, 0.4, t) - smoothstep(0.6, 1.0, t);
-        return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness, 0.0);
+        return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 0.0);
     }
     if u.style == DISSOLVE {
         // Half depth order, as in sweep-in, and half random blobs.
         let next_rank = depth_rank(next_ranks, next_depth);
         let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
-        return Blend(weight, weight, 1.0, 0.0);
+        return Blend(weight, weight, 0.0);
     }
     if u.style == PORTAL {
         let weight = portal_weight(screen_uv, depth_rank(ranks, depth), t);
-        return Blend(weight, weight, 1.0, 0.0);
+        return Blend(weight, weight, 0.0);
     }
     if u.style == TIDE_IN || u.style == TIDE_OUT {
         let uv = crop(screen_uv, u.uv_scale);
@@ -264,10 +256,10 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
         // going out.
         let weight = smoothstep(-BAND, BAND, select(-under, under, u.style == TIDE_IN));
         let surface = smoothstep(-0.02, 0.02, under) * (1.0 - smoothstep(0.0, WATER_DEPTH, under));
-        return Blend(weight, weight, 1.0, surface);
+        return Blend(weight, weight, surface);
     }
     let weight = sweep_weight(depth, next_depth, t);
-    return Blend(weight, weight, 1.0, 0.0);
+    return Blend(weight, weight, 0.0);
 }
 
 // Linear sRGB to Oklab, from https://bottosson.github.io/posts/oklab/
@@ -330,7 +322,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let blend = transition_blend(in.uv, depth, next_depth, u.progress);
     // Blending depth as well as colour morphs the parallax geometry, and
     // both images shift by it so they move together.
-    depth = mix(depth, next_depth, blend.depth) * blend.depth_scale;
+    depth = mix(depth, next_depth, blend.depth);
     let shift = u.cursor_offset * depth * u.intensity;
 
     // Under the tide's surface the water ripples and darkens a little. The

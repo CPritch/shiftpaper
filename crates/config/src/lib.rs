@@ -78,9 +78,6 @@ pub enum Transition {
     /// Everything changes together, the shape of the scene a little ahead
     /// of its colours.
     Morph,
-    /// The old scene flattens into a picture, the pictures swap, and the
-    /// new one fills out into 3D.
-    Flatten,
     /// Patches of the new wallpaper appear at random, nearer things
     /// tending to go first.
     Dissolve,
@@ -527,7 +524,6 @@ mod tests {
             ("sweep-in", Transition::SweepIn),
             ("sweep-out", Transition::SweepOut),
             ("morph", Transition::Morph),
-            ("flatten", Transition::Flatten),
             ("dissolve", Transition::Dissolve),
             ("portal", Transition::Portal),
             ("tide-in", Transition::TideIn),
