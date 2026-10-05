@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to publish to the AUR, e.g. v0.3.0
+        description: Release tag to publish to the AUR, e.g. v0.4.0
         required: true
 
 jobs:
@@ -124,8 +124,20 @@ jobs:
         working-directory: /home/builder/pkg
         run: sudo -u builder makepkg --syncdeps --noconfirm
 
+      # shiftpaper-git works out its version from git when it's built, but the
+      # AUR shows whatever its .SRCINFO says, so bring that up to this release.
+      # The version is what its pkgver() gives on the tagged commit.
+      - name: Point shiftpaper-git at this release
+        run: |
+          git config --global --add safe.directory "$PWD"
+          version="${TAG#v}.r0.g$(git rev-parse --short=7 HEAD)"
+          cp -r packaging/aur/shiftpaper-git /home/builder/pkg-git
+          chown -R builder: /home/builder/pkg-git
+          cd /home/builder/pkg-git
+          sed -i "s/^pkgver=.*/pkgver=$version/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sudo -u builder sh -c 'makepkg --printsrcinfo > .SRCINFO'
+
       - name: Push to the AUR
-        working-directory: /home/builder/pkg
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
@@ -138,16 +150,24 @@ jobs:
           echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' > "$keys/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $keys/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=$keys/known_hosts -o StrictHostKeyChecking=yes"
 
-          git clone ssh://aur@aur.archlinux.org/shiftpaper.git aur
-          cp PKGBUILD .SRCINFO aur/
-          cd aur
-          git config user.name "Charles Pritchard"
-          git config user.email "charlespritchard.work@gmail.com"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "The AUR already has this version."
-          else
-            git commit -m "Update to ${TAG#v}"
-            git push origin master
-          fi
+          # publish <package> <directory with its PKGBUILD and .SRCINFO>
+          publish() {
+            local repo
+            repo=$(mktemp -d)
+            git clone "ssh://aur@aur.archlinux.org/$1.git" "$repo"
+            cp "$2/PKGBUILD" "$2/.SRCINFO" "$repo/"
+            git -C "$repo" config user.name "Charles Pritchard"
+            git -C "$repo" config user.email "charlespritchard.work@gmail.com"
+            git -C "$repo" add PKGBUILD .SRCINFO
+            if git -C "$repo" diff --cached --quiet; then
+              echo "The AUR already has this version of $1."
+            else
+              local version
+              version=$(sed -n 's/^\tpkgver = //p' "$2/.SRCINFO")
+              git -C "$repo" commit -m "Update to $version"
+              git -C "$repo" push origin master
+            fi
+          }
+          publish shiftpaper /home/builder/pkg
+          publish shiftpaper-git /home/builder/pkg-git
 
