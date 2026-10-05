@@ -9,7 +9,8 @@ use clap::{Parser, Subcommand};
 use shiftpaper_config::{Config, TrackingMode};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use toml_edit::value;
+use std::time::SystemTime;
+use toml_edit::{DocumentMut, value};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -71,15 +72,21 @@ enum Command {
     ///
     /// Bakes each image like `set` does, then lists them in config.toml's
     /// [slideshow]. A folder adds the images directly inside it, in name
-    /// order. Reload the daemon to start the slideshow, and use `set` to
-    /// go back to a single wallpaper.
+    /// order. Reload the daemon to start the slideshow. --stop, or `set`,
+    /// goes back to a single wallpaper.
     Slideshow {
         /// Source images (jpeg, png, or webp), or folders of them.
-        #[arg(required = true)]
+        #[arg(required_unless_present = "stop")]
         inputs: Vec<PathBuf>,
         /// How long each image shows for, like 90s, 10m or 1h.
         #[arg(short, long, default_value = "10m", value_parser = parse_interval)]
         interval: NonZeroU32,
+        /// Show the images in a random order, different each time round.
+        #[arg(short, long)]
+        shuffle: bool,
+        /// Stop the slideshow, keeping the image it's showing.
+        #[arg(long, conflicts_with_all = ["inputs", "interval", "shuffle"])]
+        stop: bool,
         /// Path to the ONNX depth model. Falls back to
         /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
@@ -147,13 +154,16 @@ fn main() -> Result<()> {
             let model = resolve_model(model)?;
             set(&input, &model)
         }
+        Command::Slideshow { stop: true, .. } => stop_slideshow(),
         Command::Slideshow {
             inputs,
             interval,
+            shuffle,
             model,
+            ..
         } => {
             let model = resolve_model(model)?;
-            slideshow(&inputs, interval, &model)
+            slideshow(&inputs, interval, shuffle, &model)
         }
         Command::FetchModel { name, list, force } => fetch_model_cmd(name.as_deref(), list, force),
         Command::Mode { mode } => mode_cmd(mode),
@@ -240,7 +250,7 @@ fn print_reload_hint() {
     eprintln!("  # or: kill -HUP $(pidof shiftpaperd)");
 }
 
-fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, model: &Path) -> Result<()> {
+fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, shuffle: bool, model: &Path) -> Result<()> {
     let images = find_images(inputs)?;
     let mut baked = Vec::new();
     for (i, image) in images.iter().enumerate() {
@@ -253,13 +263,26 @@ fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, model: &Path) -> Result<(
     }
     anyhow::ensure!(!baked.is_empty(), "none of the images could be baked");
 
-    update_slideshow_config(&baked, interval, model)?;
+    update_slideshow_config(&baked, interval, shuffle, model)?;
     eprintln!();
     let plural = if baked.len() == 1 { "" } else { "s" };
     eprintln!(
         "slideshow of {} image{plural} set. reload the daemon to start it:",
         baked.len()
     );
+    print_reload_hint();
+    Ok(())
+}
+
+/// Swap the slideshow for a wallpaper of the image it's showing.
+fn stop_slideshow() -> Result<()> {
+    let Some(slideshow) = Config::load()?.and_then(|cfg| cfg.slideshow) else {
+        eprintln!("there's no slideshow to stop");
+        return Ok(());
+    };
+    let (color, depth) = slideshow.slide(slideshow.due(SystemTime::now()));
+    config::edit(|doc| write_wallpaper(doc, color, &depth))?;
+    eprintln!("slideshow stopped on the image it was showing. reload the daemon to apply:");
     print_reload_hint();
     Ok(())
 }
@@ -346,22 +369,33 @@ fn update_daemon_config(paths: &cache::BakedPaths, model: &Path) -> Result<()> {
     config::edit(|doc| {
         config::table(doc, "inference")?["model_path"] =
             value(model.to_string_lossy().into_owned());
-        let wallpaper = config::table(doc, "wallpaper")?;
-        wallpaper["color"] = value(paths.color.to_string_lossy().into_owned());
-        wallpaper["depth"] = value(paths.depth.to_string_lossy().into_owned());
-        // A slideshow would take the wallpaper's place.
-        doc.remove("slideshow");
-        Ok(())
+        write_wallpaper(doc, &paths.color, &paths.depth)
     })
 }
 
-fn update_slideshow_config(images: &[PathBuf], interval: NonZeroU32, model: &Path) -> Result<()> {
+/// Point [wallpaper] at a baked pair, and remove any slideshow, which
+/// would take its place.
+fn write_wallpaper(doc: &mut DocumentMut, color: &Path, depth: &Path) -> Result<()> {
+    let wallpaper = config::table(doc, "wallpaper")?;
+    wallpaper["color"] = value(color.to_string_lossy().into_owned());
+    wallpaper["depth"] = value(depth.to_string_lossy().into_owned());
+    doc.remove("slideshow");
+    Ok(())
+}
+
+fn update_slideshow_config(
+    images: &[PathBuf],
+    interval: NonZeroU32,
+    shuffle: bool,
+    model: &Path,
+) -> Result<()> {
     config::edit(|doc| {
         config::table(doc, "inference")?["model_path"] =
             value(model.to_string_lossy().into_owned());
         let slideshow = config::table(doc, "slideshow")?;
         slideshow["images"] = value(config::list(images));
         slideshow["interval_secs"] = value(i64::from(interval.get()));
+        slideshow["shuffle"] = value(shuffle);
         Ok(())
     })
 }
@@ -386,6 +420,31 @@ fn fetch_model_cmd(name: Option<&str>, list: bool, force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from([&["shiftpaper"], args].concat())
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn slideshow_needs_images_unless_stopping() {
+        assert!(parse(&["slideshow"]).is_err());
+        assert!(parse(&["slideshow", "--stop"]).is_ok());
+        assert!(parse(&["slideshow", "a.jpg", "--shuffle"]).is_ok());
+    }
+
+    #[test]
+    fn stop_takes_nothing_else() {
+        for extra in [&["a.jpg"][..], &["--shuffle"], &["-i", "1m"]] {
+            let args = [&["slideshow", "--stop"][..], extra].concat();
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn intervals_take_units() {
