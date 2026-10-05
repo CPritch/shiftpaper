@@ -7,7 +7,7 @@ mod moge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shiftpaper_config::{Config, TrackingMode};
+use shiftpaper_config::{Config, TrackingMode, Transition};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -114,6 +114,20 @@ enum Command {
         force: bool,
     },
 
+    /// Show or change how one wallpaper changes into the next.
+    ///
+    /// Applies to every change of wallpaper, from `set` or a slideshow,
+    /// and a running daemon picks it up straight away. With no arguments,
+    /// prints the current transition and how long it takes.
+    Transition {
+        /// The transition to use.
+        #[arg(value_enum)]
+        name: Option<Transition>,
+        /// How long it takes, in seconds, like 3 or 1.5.
+        #[arg(short, long, value_parser = parse_secs)]
+        secs: Option<f64>,
+    },
+
     /// Show or change the cursor tracking mode.
     ///
     /// Pointer mode (the default) uses Wayland's native pointer events.
@@ -167,6 +181,7 @@ fn main() -> Result<()> {
             slideshow(&inputs, interval, shuffle, &model)
         }
         Command::FetchModel { name, list, force } => fetch_model_cmd(name.as_deref(), list, force),
+        Command::Transition { name, secs } => transition_cmd(name, secs),
         Command::Mode { mode } => mode_cmd(mode),
     }
 }
@@ -365,6 +380,48 @@ fn mode_cmd(mode: Option<TrackingMode>) -> Result<()> {
     Ok(())
 }
 
+fn transition_cmd(name: Option<Transition>, secs: Option<f64>) -> Result<()> {
+    if name.is_none() && secs.is_none() {
+        let daemon = Config::load()?.map(|cfg| cfg.daemon).unwrap_or_default();
+        println!(
+            "{} ({}s)",
+            daemon.transition.as_str(),
+            daemon.transition_secs
+        );
+        return Ok(());
+    }
+    config::edit(|doc| {
+        let daemon = config::table(doc, "daemon")?;
+        if let Some(name) = name {
+            daemon["transition"] = value(name.as_str());
+        }
+        if let Some(secs) = secs {
+            daemon["transition_secs"] = value(secs);
+        }
+        Ok(())
+    })?;
+    let daemon = Config::load()?.map(|cfg| cfg.daemon).unwrap_or_default();
+    tell_daemon(
+        &format!(
+            "transition set to {} ({}s)",
+            daemon.transition.as_str(),
+            daemon.transition_secs
+        ),
+        "shiftpaperd will use it for the next change",
+    );
+    Ok(())
+}
+
+/// Parse a transition length in seconds, like 3, 1.5 or 2s.
+fn parse_secs(text: &str) -> Result<f64, String> {
+    text.strip_suffix('s')
+        .unwrap_or(text)
+        .parse::<f64>()
+        .ok()
+        .filter(|&secs| std::time::Duration::try_from_secs_f64(secs).is_ok())
+        .ok_or_else(|| format!("`{text}` isn't a usable number of seconds"))
+}
+
 fn update_tracking_mode(mode: TrackingMode) -> Result<()> {
     config::edit(|doc| {
         config::table(doc, "daemon")?["tracking_mode"] = value(mode.as_str());
@@ -460,6 +517,24 @@ mod tests {
         assert_eq!(secs("90s"), Ok(90));
         assert_eq!(secs("10m"), Ok(600));
         assert_eq!(secs("2h"), Ok(7200));
+    }
+
+    #[test]
+    fn transition_lengths_parse() {
+        assert_eq!(parse_secs("3"), Ok(3.0));
+        assert_eq!(parse_secs("1.5"), Ok(1.5));
+        assert_eq!(parse_secs("2s"), Ok(2.0));
+        assert_eq!(parse_secs("0"), Ok(0.0));
+        for text in ["", "-1", "inf", "nan", "fast", "1e30"] {
+            assert!(parse_secs(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn transitions_parse_by_name() {
+        assert!(parse(&["transition", "tide-out", "--secs", "4"]).is_ok());
+        assert!(parse(&["transition"]).is_ok());
+        assert!(parse(&["transition", "flatten"]).is_err());
     }
 
     #[test]

@@ -65,6 +65,7 @@ impl TrackingMode {
 
 /// How one wallpaper changes into the next.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Transition {
     /// A wave sweeps into the scene: the new wallpaper's nearest things
@@ -90,6 +91,31 @@ pub enum Transition {
     /// The old wallpaper drains away like a tide going out, uncovering the
     /// new one from the highest places down.
     TideOut,
+}
+
+impl Transition {
+    pub const ALL: [Self; 7] = [
+        Self::SweepIn,
+        Self::SweepOut,
+        Self::Morph,
+        Self::Dissolve,
+        Self::Portal,
+        Self::TideIn,
+        Self::TideOut,
+    ];
+
+    /// The value as written in config.toml.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SweepIn => "sweep-in",
+            Self::SweepOut => "sweep-out",
+            Self::Morph => "morph",
+            Self::Dissolve => "dissolve",
+            Self::Portal => "portal",
+            Self::TideIn => "tide-in",
+            Self::TideOut => "tide-out",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -530,6 +556,28 @@ mod tests {
             ("tide-out", Transition::TideOut),
         ] {
             let cfg = parse(&format!("[daemon]\ntransition = \"{text}\""));
+            assert_eq!(cfg.daemon.transition, transition);
+        }
+    }
+
+    #[cfg(feature = "clap")]
+    #[test]
+    fn transition_names_on_the_command_line_match_the_config() {
+        use clap::ValueEnum;
+        assert_eq!(Transition::value_variants(), Transition::ALL);
+        for transition in Transition::ALL {
+            let name = transition.to_possible_value().unwrap();
+            assert_eq!(name.get_name(), transition.as_str());
+        }
+    }
+
+    #[test]
+    fn transition_strings_match_the_parser() {
+        for transition in Transition::ALL {
+            let cfg = parse(&format!(
+                "[daemon]\ntransition = \"{}\"",
+                transition.as_str()
+            ));
             assert_eq!(cfg.daemon.transition, transition);
         }
     }

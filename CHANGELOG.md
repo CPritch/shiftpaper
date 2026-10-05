@@ -5,7 +5,7 @@
 ### Added
 
 - Slideshows. `shiftpaper slideshow` bakes a set of images, or folders of them, and the daemon moves through them on a timer, in order or with `--shuffle`. They pause while idle or on low battery, and `shiftpaper slideshow --stop` keeps whichever image is showing.
-- Transitions. Changing wallpaper, whether by slideshow or `shiftpaper set` and a reload, morphs from one to the next through the depth of the scene, and the parallax carries on throughout. `transition` under `[daemon]` picks which, and `transition_secs` how long it takes (3 by default):
+- Transitions. Changing wallpaper, whether by slideshow or `shiftpaper set` and a reload, morphs from one to the next through the depth of the scene, and the parallax carries on throughout. `shiftpaper transition <name> [--secs N]` picks which and how long it takes (3 seconds by default), and `shiftpaper transition --help` describes them all:
   - `sweep-in` (the default): a wave sweeps into the scene, near things first.
   - `sweep-out`: the background goes first and the nearest things last.
   - `morph`: everything at once, the shape of the scene a little ahead of its colours.
