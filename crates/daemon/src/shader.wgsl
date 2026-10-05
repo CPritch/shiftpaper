@@ -38,8 +38,8 @@ struct Uniforms {
     // screen's aspect ratio.
     uv_scale: vec2<f32>,
     next_uv_scale: vec2<f32>,
-    // 1 switches near pixels first, 0 far pixels first.
-    near_first: f32,
+    // Which transition, one of the constants below.
+    style: u32,
     _pad: f32,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
@@ -48,6 +48,12 @@ struct Uniforms {
 // the visible area instead of stretching the edges. Must match MARGIN in
 // renderer.rs.
 const MARGIN: f32 = 0.025;
+// Transitions. Must match `shader_style` in renderer.rs.
+const NEAR_FIRST: u32 = 0u;
+const FAR_FIRST: u32 = 1u;
+const ALL_AT_ONCE: u32 = 2u;
+const FLATTEN: u32 = 3u;
+
 // Half the width of the slice of depth ranks that is part way through
 // switching at any moment. Narrower gives a crisper wavefront, wider a
 // softer dissolve.
@@ -73,7 +79,8 @@ fn depth_rank(table: texture_1d<f32>, depth: f32) -> f32 {
     return mix(farther, next, x - f32(i));
 }
 
-// How far a pixel has switched to the next wallpaper. Think of a plane
+// How far a pixel has switched to the next wallpaper in a near-first or
+// far-first sweep. Think of a plane
 // sweeping through both scenes, taking away the current wallpaper's
 // surfaces and putting the next one's in place as it passes them, with
 // each pixel showing whichever surface is nearest.
@@ -85,15 +92,39 @@ fn depth_rank(table: texture_1d<f32>, depth: f32) -> f32 {
 //
 // Depths are compared by rank, so the sweep spends similar time on each
 // part of the picture.
-fn transition_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
+fn sweep_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
     let rank = depth_rank(ranks, depth);
     let next_rank = depth_rank(next_ranks, next_depth);
     // How far the plane has to travel before this pixel switches.
-    let distance = select(max(rank, next_rank), 1.0 - next_rank, u.near_first > 0.5);
+    let distance = select(max(rank, next_rank), 1.0 - next_rank, u.style == NEAR_FIRST);
     // The plane travels from -BAND to 1 + BAND, so every pixel starts at 0
     // and ends at 1 whatever its depth.
     let plane = t * (1.0 + 2.0 * BAND) - BAND;
     return 1.0 - smoothstep(plane - BAND, plane + BAND, distance);
+}
+
+// How far a pixel has changed into the next wallpaper, for its colour and
+// its depth separately, and how much depth the scene has right now.
+struct Blend {
+    color: f32,
+    depth: f32,
+    depth_scale: f32,
+};
+
+fn transition_blend(depth: f32, next_depth: f32, t: f32) -> Blend {
+    if u.style == ALL_AT_ONCE {
+        // The shape of the scene leads and its colours follow, so it reads
+        // as a morph rather than a crossfade.
+        return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 1.0);
+    }
+    if u.style == FLATTEN {
+        // Flat through the middle fifth, while the pictures swap over, so
+        // the change of shape can't be seen.
+        let flatness = smoothstep(0.0, 0.4, t) - smoothstep(0.6, 1.0, t);
+        return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness);
+    }
+    let weight = sweep_weight(depth, next_depth, t);
+    return Blend(weight, weight, 1.0);
 }
 
 // Linear sRGB to Oklab, from https://bottosson.github.io/posts/oklab/
@@ -153,12 +184,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let next_uv = crop(in.uv, u.next_uv_scale);
     let next_depth = load_depth(next_depth_tex, next_uv);
-    let weight = transition_weight(depth, next_depth, u.progress);
+    let blend = transition_blend(depth, next_depth, u.progress);
     // Blending depth as well as colour morphs the parallax geometry, and
     // both images shift by it so they move together.
-    depth = mix(depth, next_depth, weight);
+    depth = mix(depth, next_depth, blend.depth) * blend.depth_scale;
     let shift = u.cursor_offset * depth * u.intensity;
     let color = textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
     let next_color = textureSample(next_color_tex, tex_sampler, next_uv - shift * u.next_uv_scale);
-    return mix_oklab(color, next_color, weight);
+    return mix_oklab(color, next_color, blend.color);
 }

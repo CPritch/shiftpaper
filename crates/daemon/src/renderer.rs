@@ -2,6 +2,7 @@ use crate::depth::{DepthMap, RANK_POINTS, load_depth_map};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use image::imageops::{self, FilterType};
+use shiftpaper_config::Transition;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -18,7 +19,8 @@ struct Uniforms {
     progress: f32,
     uv_scale: [f32; 2],
     next_uv_scale: [f32; 2],
-    near_first: f32,
+    /// From `shader_style`.
+    style: u32,
     _pad: f32,
 }
 
@@ -103,12 +105,12 @@ pub struct Wallpaper {
     size: (u32, u32),
 }
 
-/// A depth-ordered transition to another wallpaper.
-struct Transition {
+/// A transition to another wallpaper that's under way.
+struct ActiveTransition {
     next: Wallpaper,
     start: Instant,
     duration: Duration,
-    near_first: bool,
+    style: Transition,
     /// Frames drawn so far, logged at the end to show how smooth it was.
     frames: u32,
 }
@@ -118,7 +120,7 @@ pub struct OutputRenderState {
     pub config: wgpu::SurfaceConfiguration,
     bind_group: wgpu::BindGroup,
     current: Wallpaper,
-    transition: Option<Transition>,
+    transition: Option<ActiveTransition>,
     uniform_buffer: wgpu::Buffer,
     current_offset: (f32, f32),
     pub target_offset: (f32, f32),
@@ -152,24 +154,24 @@ impl OutputRenderState {
         self.current = wallpaper;
     }
 
-    /// Start a depth-ordered transition to `next`. A transition that is
-    /// already running skips to its end first.
+    /// Start a transition to `next`. A transition that is already running
+    /// skips to its end first.
     pub fn start_transition(
         &mut self,
         renderer: &Renderer,
         next: Wallpaper,
         duration: Duration,
-        near_first: bool,
+        style: Transition,
     ) {
         if let Some(running) = self.transition.take() {
             self.current = running.next;
         }
         self.bind_group = renderer.create_bind_group(&self.current, &next, &self.uniform_buffer);
-        self.transition = Some(Transition {
+        self.transition = Some(ActiveTransition {
             next,
             start: Instant::now(),
             duration,
-            near_first,
+            style,
             frames: 0,
         });
     }
@@ -199,16 +201,16 @@ impl OutputRenderState {
         self.current_offset = (nx, ny);
 
         let screen = (self.config.width, self.config.height);
-        let (progress, next, near_first) = match &mut self.transition {
+        let (progress, next, style) = match &mut self.transition {
             Some(t) => {
                 t.frames += 1;
                 (
                     transition_progress(t.start.elapsed(), t.duration),
                     &t.next,
-                    t.near_first,
+                    t.style,
                 )
             }
-            None => (0.0, &self.current, true),
+            None => (0.0, &self.current, Transition::default()),
         };
         let uniforms = Uniforms {
             cursor_offset: [nx, ny],
@@ -216,12 +218,23 @@ impl OutputRenderState {
             progress,
             uv_scale: cover_uv_scale(self.current.size, screen),
             next_uv_scale: cover_uv_scale(next.size, screen),
-            near_first: if near_first { 1.0 } else { 0.0 },
+            style: shader_style(style),
             _pad: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
         moved || self.transition.is_some()
+    }
+}
+
+/// The shader's number for each transition. Must match the constants in
+/// shader.wgsl.
+fn shader_style(style: Transition) -> u32 {
+    match style {
+        Transition::NearFirst => 0,
+        Transition::FarFirst => 1,
+        Transition::AllAtOnce => 2,
+        Transition::Flatten => 3,
     }
 }
 
@@ -738,6 +751,20 @@ mod tests {
     #[test]
     fn taller_image_is_cropped_vertically() {
         assert_close(cover_uv_scale((1000, 2000), (2000, 1000)), [1.0, 0.25]);
+    }
+
+    #[test]
+    fn transition_numbers_match_the_shader() {
+        let src = include_str!("shader.wgsl");
+        for (name, style) in [
+            ("NEAR_FIRST", Transition::NearFirst),
+            ("FAR_FIRST", Transition::FarFirst),
+            ("ALL_AT_ONCE", Transition::AllAtOnce),
+            ("FLATTEN", Transition::Flatten),
+        ] {
+            let line = format!("const {name}: u32 = {}u;", shader_style(style));
+            assert!(src.contains(&line), "{line}");
+        }
     }
 
     #[test]

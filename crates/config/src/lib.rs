@@ -63,7 +63,7 @@ impl TrackingMode {
     }
 }
 
-/// The order a change of wallpaper sweeps through the picture in, by depth.
+/// How one wallpaper changes into the next.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transition {
@@ -74,6 +74,12 @@ pub enum Transition {
     /// The old wallpaper's background gives way to the new one first, and
     /// its nearest things go last.
     FarFirst,
+    /// Everything changes together, the shape of the scene a little ahead
+    /// of its colours.
+    AllAtOnce,
+    /// The old scene flattens into a picture, the pictures swap, and the
+    /// new one fills out into 3D.
+    Flatten,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -504,8 +510,14 @@ mod tests {
         let cfg = parse("");
         assert_eq!(cfg.daemon.transition, Transition::NearFirst);
         assert_eq!(cfg.daemon.transition_secs, 3.0);
-        let cfg = parse("[daemon]\ntransition = \"far-first\"");
-        assert_eq!(cfg.daemon.transition, Transition::FarFirst);
+        for (text, transition) in [
+            ("far-first", Transition::FarFirst),
+            ("all-at-once", Transition::AllAtOnce),
+            ("flatten", Transition::Flatten),
+        ] {
+            let cfg = parse(&format!("[daemon]\ntransition = \"{text}\""));
+            assert_eq!(cfg.daemon.transition, transition);
+        }
     }
 
     #[test]

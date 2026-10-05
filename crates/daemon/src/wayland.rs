@@ -232,7 +232,7 @@ impl App {
             }
         };
 
-        let (duration, near_first) = transition_settings(&new_cfg);
+        let (duration, style) = transition_settings(&new_cfg);
         let screens = self.screen_sizes();
         for output in &self.outputs {
             if !output.configured {
@@ -248,7 +248,7 @@ impl App {
                 ) else {
                     continue;
                 };
-                rt.start_transition(renderer, wallpaper, duration, near_first);
+                rt.start_transition(renderer, wallpaper, duration, style);
                 info!(name = output.name, "reloaded wallpaper");
             }
         }
@@ -274,12 +274,12 @@ impl App {
             return;
         };
 
-        let (duration, near_first) = transition_settings(&self.config);
+        let (duration, style) = transition_settings(&self.config);
         for output in &self.outputs {
             if self.config.in_slideshow(&output.name)
                 && let Some(rt) = self.render_targets.get_mut(&output.name)
             {
-                rt.start_transition(renderer, next.clone(), duration, near_first);
+                rt.start_transition(renderer, next.clone(), duration, style);
             }
         }
         for idx in 0..self.outputs.len() {
@@ -453,11 +453,11 @@ fn load_wallpaper_for(
         .ok()
 }
 
-/// How long a change of wallpaper takes, and whether near things go first.
-fn transition_settings(config: &Config) -> (Duration, bool) {
+/// How long a change of wallpaper takes, and which transition it uses.
+fn transition_settings(config: &Config) -> (Duration, Transition) {
     (
         Duration::from_secs_f32(config.daemon.transition_secs),
-        config.daemon.transition == Transition::NearFirst,
+        config.daemon.transition,
     )
 }
 
