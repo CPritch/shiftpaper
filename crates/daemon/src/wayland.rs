@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -21,6 +22,7 @@ use smithay_client_toolkit::{
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use wayland_client::{
@@ -37,7 +39,7 @@ use wayland_protocols::wp::{
 };
 
 use crate::cursor::HyprlandCursor;
-use crate::renderer::{OutputRenderState, Renderer, Wallpaper};
+use crate::renderer::{DecodedWallpaper, OutputRenderState, Renderer, Wallpaper, WallpaperFiles};
 use crate::slideshow::Slideshow;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -120,6 +122,8 @@ pub struct App {
     pub renderer: Option<Renderer>,
     pub render_targets: HashMap<String, OutputRenderState>,
     slideshow: Option<Slideshow>,
+    /// A reload whose wallpapers are still decoding.
+    pending: Option<PendingReload>,
     pub cursor: Option<HyprlandCursor>,
     pub pointer: Option<wl_pointer::WlPointer>,
     pub seat: Option<wl_seat::WlSeat>,
@@ -160,6 +164,7 @@ impl App {
 
         Ok(Self {
             slideshow: config.slideshow.clone().map(Slideshow::new),
+            pending: None,
             config,
             registry_state,
             compositor_state,
@@ -203,9 +208,10 @@ impl App {
         }
     }
 
-    /// Hot-reload config.toml. Reloads wallpaper textures and rebuilds
-    /// bind groups for every output. Tracking mode and idle timeout
-    /// changes require a full restart.
+    /// Hot-reload config.toml. Wallpapers that change are decoded on
+    /// background threads, while the old ones keep animating, and
+    /// `update_reload` starts the transitions once they're ready. Tracking
+    /// mode and idle timeout changes require a full restart.
     pub fn reload_config(&mut self) {
         let mut new_cfg = match crate::config::load() {
             Ok(c) => c,
@@ -225,40 +231,110 @@ impl App {
             warn!("idle_timeout_secs changed, restart required to take effect");
         }
 
-        // Start the slideshow afresh, as its images may have changed.
-        self.slideshow = new_cfg.slideshow.clone().map(Slideshow::new);
-        let renderer = match &self.renderer {
-            Some(r) => r,
-            None => {
-                self.config = new_cfg;
-                return;
-            }
+        // A slideshow that hasn't changed carries on undisturbed. A new one
+        // starts on the slide the clock says is due.
+        let slide = if new_cfg.slideshow != self.config.slideshow {
+            self.slideshow = new_cfg.slideshow.clone().map(Slideshow::new);
+            self.slideshow.as_mut().map(|slideshow| {
+                let (index, files) = slideshow.due();
+                // Taking the slide now stops the slideshow loading it too.
+                // render_targets rather than self, which slideshow borrows.
+                slideshow.showing(index, showing(&self.render_targets, &files));
+                (index, files)
+            })
+        } else {
+            None
         };
-
-        let (duration, style) = transition_settings(&new_cfg);
-        let screens = self.screen_sizes();
-        for output in &self.outputs {
-            if !output.configured {
-                continue;
-            }
-            if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let Some(wallpaper) = load_wallpaper_for(
-                    renderer,
-                    &new_cfg,
-                    self.slideshow.as_mut(),
-                    &output.name,
-                    &screens,
-                ) else {
-                    continue;
-                };
-                rt.start_transition(renderer, wallpaper, duration, style);
-                info!(name = output.name, "reloaded wallpaper");
-            }
-        }
-
         self.config = new_cfg;
         self.needs_render = true;
         info!("config reloaded via SIGHUP");
+        if self.renderer.is_none() {
+            return;
+        }
+
+        // Work out what each output should show, and start decoding
+        // whatever isn't on screen already, once however many outputs show
+        // it. Settings like the transition don't change any wallpaper.
+        let screens = self.screen_sizes();
+        let due = self.slideshow.as_ref().map(Slideshow::due);
+        let mut changes = Vec::new();
+        let mut decoding = HashMap::new();
+        for output in self.outputs.iter().filter(|o| o.configured) {
+            let Some(rt) = self.render_targets.get(&output.name) else {
+                continue;
+            };
+            let files = if self.config.in_slideshow(&output.name) {
+                match &due {
+                    Some((_, files)) => files.clone(),
+                    None => continue,
+                }
+            } else {
+                let (Some(color), Some(depth)) = (
+                    self.config.color_for(&output.name),
+                    self.config.depth_for(&output.name),
+                ) else {
+                    warn!(
+                        name = output.name,
+                        "reload: no wallpaper set for this output"
+                    );
+                    continue;
+                };
+                (color.to_path_buf(), depth)
+            };
+            if rt.showing().files == files {
+                continue;
+            }
+            decoding
+                .entry(files.clone())
+                .or_insert_with(|| decode(files.clone(), screens.clone()));
+            changes.push((output.name.clone(), files));
+        }
+        self.pending = Some(PendingReload {
+            changes,
+            decoding,
+            slide,
+        });
+    }
+
+    /// Finish a reload once its wallpapers have decoded: upload them and
+    /// start each output's transition. Called from the main loop.
+    pub fn update_reload(&mut self, qh: &QueueHandle<Self>) {
+        if let Some(pending) = &self.pending
+            && !pending.decoding.values().all(JoinHandle::is_finished)
+        {
+            return;
+        }
+        let (Some(pending), Some(renderer)) = (self.pending.take(), &self.renderer) else {
+            return;
+        };
+
+        let mut ready = HashMap::new();
+        for (files, handle) in pending.decoding {
+            let decoded = handle
+                .join()
+                .unwrap_or_else(|_| Err(anyhow!("the loading thread panicked")));
+            match decoded {
+                Ok(decoded) => {
+                    ready.insert(files, renderer.upload_wallpaper(&decoded));
+                }
+                Err(e) => warn!("reload: {e:#}"),
+            }
+        }
+        if let (Some(slideshow), Some((index, files))) = (&mut self.slideshow, pending.slide) {
+            slideshow.showing(index, ready.get(&files).cloned());
+        }
+        let (duration, style) = transition_settings(&self.config);
+        for (name, files) in pending.changes {
+            if let (Some(wallpaper), Some(rt)) =
+                (ready.get(&files), self.render_targets.get_mut(&name))
+            {
+                rt.start_transition(renderer, wallpaper.clone(), duration, style);
+                info!(name, "reloaded wallpaper");
+            }
+        }
+        for idx in 0..self.outputs.len() {
+            self.advance(qh, idx);
+        }
     }
 
     /// Move the slideshow on once the next slide is due and loaded. Called
@@ -425,9 +501,41 @@ impl App {
     }
 }
 
+/// A reload waiting for its wallpapers to decode on background threads, so
+/// the parallax doesn't stall on a big image.
+struct PendingReload {
+    /// Each output changing wallpaper, and the files it's changing to.
+    changes: Vec<(String, WallpaperFiles)>,
+    /// Each wallpaper being decoded, once however many outputs show it.
+    decoding: HashMap<WallpaperFiles, JoinHandle<anyhow::Result<DecodedWallpaper>>>,
+    /// The slide a restarted slideshow begins on.
+    slide: Option<(usize, WallpaperFiles)>,
+}
+
+/// Decode a wallpaper on a background thread.
+fn decode(
+    files: WallpaperFiles,
+    screens: Vec<(u32, u32)>,
+) -> JoinHandle<anyhow::Result<DecodedWallpaper>> {
+    std::thread::spawn(move || DecodedWallpaper::load(&files.0, &files.1, &screens))
+}
+
+/// The wallpaper with these files if one of `targets` is showing it.
+fn showing(
+    targets: &HashMap<String, OutputRenderState>,
+    files: &WallpaperFiles,
+) -> Option<Wallpaper> {
+    targets
+        .values()
+        .map(OutputRenderState::showing)
+        .find(|wallpaper| &wallpaper.files == files)
+        .cloned()
+}
+
 /// Load what an output should show: the current slide if it's in the
-/// slideshow, else its own wallpaper or the global one. Logs why if there's
-/// nothing to show.
+/// slideshow, else its own wallpaper or the global one. Another output's
+/// copy is shared if one is showing it already. Logs why if there's nothing
+/// to show.
 ///
 /// This takes the parts of `App` it needs rather than `&mut self`, so
 /// callers can hold the renderer and a render target at the same time.
@@ -435,6 +543,7 @@ fn load_wallpaper_for(
     renderer: &Renderer,
     config: &Config,
     slideshow: Option<&mut Slideshow>,
+    targets: &HashMap<String, OutputRenderState>,
     output_name: &str,
     screens: &[(u32, u32)],
 ) -> Option<Wallpaper> {
@@ -450,6 +559,9 @@ fn load_wallpaper_for(
         warn!(name = output_name, "no wallpaper set for this output");
         return None;
     };
+    if let Some(wallpaper) = showing(targets, &(color.to_path_buf(), depth.clone())) {
+        return Some(wallpaper);
+    }
     renderer
         .load_wallpaper(color, &depth, screens)
         .inspect_err(|e| warn!(name = output_name, "{e:#}"))
@@ -703,6 +815,7 @@ impl LayerShellHandler for App {
                 renderer,
                 &self.config,
                 self.slideshow.as_mut(),
+                &self.render_targets,
                 &output_name,
                 &screens,
             ) else {

@@ -1,12 +1,13 @@
 mod cache;
 mod config;
+mod daemon;
 mod depth;
 mod fetch_model;
 mod moge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shiftpaper_config::{Config, TrackingMode};
+use shiftpaper_config::{Config, TrackingMode, Transition};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -55,9 +56,9 @@ enum Command {
     /// Bake an image and set it as the active wallpaper.
     ///
     /// Performs the same baking as `bake`, then points the daemon's
-    /// config.toml at it, replacing any slideshow. Reload the daemon to
-    /// show it. The resolved model path is also persisted to [inference]
-    /// so future invocations don't need --model.
+    /// config.toml at it, replacing any slideshow, and a running daemon
+    /// changes to it. The resolved model path is also persisted to
+    /// [inference] so future invocations don't need --model.
     Set {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
@@ -72,8 +73,8 @@ enum Command {
     ///
     /// Bakes each image like `set` does, then lists them in config.toml's
     /// [slideshow]. A folder adds the images directly inside it, in name
-    /// order. Reload the daemon to start the slideshow. --stop, or `set`,
-    /// goes back to a single wallpaper.
+    /// order. A running daemon starts the slideshow straight away. --stop,
+    /// or `set`, goes back to a single wallpaper.
     Slideshow {
         /// Source images (jpeg, png, or webp), or folders of them.
         #[arg(required_unless_present = "stop")]
@@ -111,6 +112,20 @@ enum Command {
         /// Re-download even if the files already exist.
         #[arg(long, short)]
         force: bool,
+    },
+
+    /// Show or change how one wallpaper changes into the next.
+    ///
+    /// Applies to every change of wallpaper, from `set` or a slideshow,
+    /// and a running daemon picks it up straight away. With no arguments,
+    /// prints the current transition and how long it takes.
+    Transition {
+        /// The transition to use.
+        #[arg(value_enum)]
+        name: Option<Transition>,
+        /// How long it takes, in seconds, like 3 or 1.5.
+        #[arg(short, long, value_parser = parse_secs)]
+        secs: Option<f64>,
     },
 
     /// Show or change the cursor tracking mode.
@@ -166,6 +181,7 @@ fn main() -> Result<()> {
             slideshow(&inputs, interval, shuffle, &model)
         }
         Command::FetchModel { name, list, force } => fetch_model_cmd(name.as_deref(), list, force),
+        Command::Transition { name, secs } => transition_cmd(name, secs),
         Command::Mode { mode } => mode_cmd(mode),
     }
 }
@@ -240,14 +256,19 @@ fn set(input: &Path, model: &Path) -> Result<()> {
     print_paths(&paths);
     update_daemon_config(&paths, model)?;
     eprintln!();
-    eprintln!("wallpaper set. reload the daemon to apply:");
-    print_reload_hint();
+    tell_daemon("wallpaper set", "shiftpaperd is changing to it");
     Ok(())
 }
 
-fn print_reload_hint() {
-    eprintln!("  systemctl --user reload shiftpaperd");
-    eprintln!("  # or: kill -HUP $(pidof shiftpaperd)");
+/// Say what changed and reload a running shiftpaperd so it takes effect,
+/// or say how to start one.
+fn tell_daemon(done: &str, happening: &str) {
+    if daemon::reload() > 0 {
+        eprintln!("{done}. {happening}.");
+    } else {
+        eprintln!("{done}. shiftpaperd isn't running, so start it to see it:");
+        eprintln!("  systemctl --user enable --now shiftpaperd");
+    }
 }
 
 fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, shuffle: bool, model: &Path) -> Result<()> {
@@ -266,11 +287,10 @@ fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, shuffle: bool, model: &Pa
     update_slideshow_config(&baked, interval, shuffle, model)?;
     eprintln!();
     let plural = if baked.len() == 1 { "" } else { "s" };
-    eprintln!(
-        "slideshow of {} image{plural} set. reload the daemon to start it:",
-        baked.len()
+    tell_daemon(
+        &format!("slideshow of {} image{plural} set", baked.len()),
+        "shiftpaperd is starting it",
     );
-    print_reload_hint();
     Ok(())
 }
 
@@ -282,8 +302,10 @@ fn stop_slideshow() -> Result<()> {
     };
     let (color, depth) = slideshow.slide(slideshow.due(SystemTime::now()));
     config::edit(|doc| write_wallpaper(doc, color, &depth))?;
-    eprintln!("slideshow stopped on the image it was showing. reload the daemon to apply:");
-    print_reload_hint();
+    tell_daemon(
+        "slideshow stopped",
+        "shiftpaperd is keeping the image it was showing",
+    );
     Ok(())
 }
 
@@ -356,6 +378,48 @@ fn mode_cmd(mode: Option<TrackingMode>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn transition_cmd(name: Option<Transition>, secs: Option<f64>) -> Result<()> {
+    if name.is_none() && secs.is_none() {
+        let daemon = Config::load()?.map(|cfg| cfg.daemon).unwrap_or_default();
+        println!(
+            "{} ({}s)",
+            daemon.transition.as_str(),
+            daemon.transition_secs
+        );
+        return Ok(());
+    }
+    config::edit(|doc| {
+        let daemon = config::table(doc, "daemon")?;
+        if let Some(name) = name {
+            daemon["transition"] = value(name.as_str());
+        }
+        if let Some(secs) = secs {
+            daemon["transition_secs"] = value(secs);
+        }
+        Ok(())
+    })?;
+    let daemon = Config::load()?.map(|cfg| cfg.daemon).unwrap_or_default();
+    tell_daemon(
+        &format!(
+            "transition set to {} ({}s)",
+            daemon.transition.as_str(),
+            daemon.transition_secs
+        ),
+        "shiftpaperd will use it for the next change",
+    );
+    Ok(())
+}
+
+/// Parse a transition length in seconds, like 3, 1.5 or 2s.
+fn parse_secs(text: &str) -> Result<f64, String> {
+    text.strip_suffix('s')
+        .unwrap_or(text)
+        .parse::<f64>()
+        .ok()
+        .filter(|&secs| std::time::Duration::try_from_secs_f64(secs).is_ok())
+        .ok_or_else(|| format!("`{text}` isn't a usable number of seconds"))
 }
 
 fn update_tracking_mode(mode: TrackingMode) -> Result<()> {
@@ -453,6 +517,24 @@ mod tests {
         assert_eq!(secs("90s"), Ok(90));
         assert_eq!(secs("10m"), Ok(600));
         assert_eq!(secs("2h"), Ok(7200));
+    }
+
+    #[test]
+    fn transition_lengths_parse() {
+        assert_eq!(parse_secs("3"), Ok(3.0));
+        assert_eq!(parse_secs("1.5"), Ok(1.5));
+        assert_eq!(parse_secs("2s"), Ok(2.0));
+        assert_eq!(parse_secs("0"), Ok(0.0));
+        for text in ["", "-1", "inf", "nan", "fast", "1e30"] {
+            assert!(parse_secs(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn transitions_parse_by_name() {
+        assert!(parse(&["transition", "tide-out", "--secs", "4"]).is_ok());
+        assert!(parse(&["transition"]).is_ok());
+        assert!(parse(&["transition", "flatten"]).is_err());
     }
 
     #[test]

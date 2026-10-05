@@ -1,6 +1,6 @@
 //! Steps through [slideshow]'s images on a timer.
 
-use crate::renderer::{DecodedWallpaper, Renderer, Wallpaper};
+use crate::renderer::{DecodedWallpaper, Renderer, Wallpaper, WallpaperFiles};
 use anyhow::{Result, anyhow};
 use shiftpaper_config::SlideshowConfig;
 use std::thread::JoinHandle;
@@ -25,6 +25,23 @@ impl Slideshow {
             index: None,
             wallpaper: None,
             loading: None,
+        }
+    }
+
+    /// The slide the clock says to show now, and its files.
+    pub fn due(&self) -> (usize, WallpaperFiles) {
+        let index = self.config.due(SystemTime::now());
+        let (color, depth) = self.config.slide(index);
+        (index, (color.to_path_buf(), depth))
+    }
+
+    /// Note that slide `index` is on screen, loaded elsewhere, so it isn't
+    /// loaded again. Without a wallpaper, it's still loading or failed to,
+    /// and the slideshow waits for the next slide rather than retrying.
+    pub fn showing(&mut self, index: usize, wallpaper: Option<Wallpaper>) {
+        self.index = Some(index);
+        if wallpaper.is_some() {
+            self.wallpaper = wallpaper;
         }
     }
 

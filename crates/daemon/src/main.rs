@@ -155,6 +155,7 @@ fn main() -> Result<()> {
             app.reload_config();
         }
 
+        app.update_reload(&qh);
         app.update_slideshow(&qh);
 
         if app.needs_render {
