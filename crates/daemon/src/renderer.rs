@@ -299,9 +299,9 @@ impl OutputRenderState {
 /// shader.wgsl.
 fn shader_style(style: Transition) -> u32 {
     match style {
-        Transition::NearFirst => 0,
-        Transition::FarFirst => 1,
-        Transition::AllAtOnce => 2,
+        Transition::SweepIn => 0,
+        Transition::SweepOut => 1,
+        Transition::Morph => 2,
         Transition::Flatten => 3,
         Transition::Dissolve => 4,
         Transition::Portal => 5,
@@ -827,9 +827,9 @@ mod tests {
     fn transition_numbers_match_the_shader() {
         let src = include_str!("shader.wgsl");
         for (name, style) in [
-            ("NEAR_FIRST", Transition::NearFirst),
-            ("FAR_FIRST", Transition::FarFirst),
-            ("ALL_AT_ONCE", Transition::AllAtOnce),
+            ("SWEEP_IN", Transition::SweepIn),
+            ("SWEEP_OUT", Transition::SweepOut),
+            ("MORPH", Transition::Morph),
             ("FLATTEN", Transition::Flatten),
             ("DISSOLVE", Transition::Dissolve),
             ("PORTAL", Transition::Portal),

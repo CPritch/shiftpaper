@@ -67,16 +67,17 @@ impl TrackingMode {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transition {
-    /// The new wallpaper's nearest things appear first, in front of the
-    /// old one, and it fills in towards the distance.
+    /// A wave sweeps into the scene: the new wallpaper's nearest things
+    /// appear first, in front of the old one, and it fills in towards the
+    /// distance.
     #[default]
-    NearFirst,
-    /// The old wallpaper's background gives way to the new one first, and
-    /// its nearest things go last.
-    FarFirst,
+    SweepIn,
+    /// A wave sweeps out of the scene: the old wallpaper's background gives
+    /// way to the new one first, and its nearest things go last.
+    SweepOut,
     /// Everything changes together, the shape of the scene a little ahead
     /// of its colours.
-    AllAtOnce,
+    Morph,
     /// The old scene flattens into a picture, the pictures swap, and the
     /// new one fills out into 3D.
     Flatten,
@@ -512,13 +513,14 @@ mod tests {
     }
 
     #[test]
-    fn transition_defaults_to_near_first() {
+    fn transition_defaults_to_sweep_in() {
         let cfg = parse("");
-        assert_eq!(cfg.daemon.transition, Transition::NearFirst);
+        assert_eq!(cfg.daemon.transition, Transition::SweepIn);
         assert_eq!(cfg.daemon.transition_secs, 3.0);
         for (text, transition) in [
-            ("far-first", Transition::FarFirst),
-            ("all-at-once", Transition::AllAtOnce),
+            ("sweep-in", Transition::SweepIn),
+            ("sweep-out", Transition::SweepOut),
+            ("morph", Transition::Morph),
             ("flatten", Transition::Flatten),
             ("dissolve", Transition::Dissolve),
             ("portal", Transition::Portal),

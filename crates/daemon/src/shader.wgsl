@@ -57,9 +57,9 @@ struct Uniforms {
 // renderer.rs.
 const MARGIN: f32 = 0.025;
 // Transitions. Must match `shader_style` in renderer.rs.
-const NEAR_FIRST: u32 = 0u;
-const FAR_FIRST: u32 = 1u;
-const ALL_AT_ONCE: u32 = 2u;
+const SWEEP_IN: u32 = 0u;
+const SWEEP_OUT: u32 = 1u;
+const MORPH: u32 = 2u;
 const FLATTEN: u32 = 3u;
 const DISSOLVE: u32 = 4u;
 const PORTAL: u32 = 5u;
@@ -94,16 +94,16 @@ fn depth_rank(table: texture_1d<f32>, depth: f32) -> f32 {
     return mix(farther, next, x - f32(i));
 }
 
-// How far a pixel has switched to the next wallpaper in a near-first or
-// far-first sweep. Think of a plane
-// sweeping through both scenes, taking away the current wallpaper's
-// surfaces and putting the next one's in place as it passes them, with
-// each pixel showing whichever surface is nearest.
+// How far a pixel has switched to the next wallpaper in a sweep. Think of
+// a plane sweeping through both scenes, taking away the current
+// wallpaper's surfaces and putting the next one's in place as it passes
+// them, with each pixel showing whichever surface is nearest.
 //
-// Near first, a pixel switches once the plane reaches the next
-// wallpaper's surface there, which is then in front of anything left of
-// the current one. Far first, it also has to wait for the current
-// wallpaper's surface to go, as that is in front until it does.
+// Sweeping in, from near to far, a pixel switches once the plane reaches
+// the next wallpaper's surface there, which is then in front of anything
+// left of the current one. Sweeping out, from far to near, it also has to
+// wait for the current wallpaper's surface to go, as that is in front
+// until it does.
 //
 // Depths are compared by rank, so the sweep spends similar time on each
 // part of the picture.
@@ -111,7 +111,7 @@ fn sweep_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
     let rank = depth_rank(ranks, depth);
     let next_rank = depth_rank(next_ranks, next_depth);
     // How far the plane has to travel before this pixel switches.
-    let distance = select(max(rank, next_rank), 1.0 - next_rank, u.style == NEAR_FIRST);
+    let distance = select(max(rank, next_rank), 1.0 - next_rank, u.style == SWEEP_IN);
     return swept(distance, t);
 }
 
@@ -181,7 +181,7 @@ struct Blend {
 };
 
 fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -> Blend {
-    if u.style == ALL_AT_ONCE {
+    if u.style == MORPH {
         // The shape of the scene leads and its colours follow, so it reads
         // as a morph rather than a crossfade.
         return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 1.0);
@@ -193,7 +193,7 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
         return Blend(smoothstep(0.35, 0.65, t), step(0.5, t), 1.0 - flatness);
     }
     if u.style == DISSOLVE {
-        // Half depth order, near first, and half random blobs.
+        // Half depth order, as in sweep-in, and half random blobs.
         let next_rank = depth_rank(next_ranks, next_depth);
         let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
         return Blend(weight, weight, 1.0);
