@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Slideshows. `shiftpaper slideshow` bakes a set of images, or folders of them, and the daemon moves through them on a timer, in order or with `--shuffle`. They pause while idle or on low battery, and `shiftpaper slideshow --stop` keeps whichever image is showing.
+- Transitions. Changing wallpaper, whether by slideshow or `shiftpaper set` and a reload, morphs from one to the next through the depth of the scene, and the parallax carries on throughout. `transition` under `[daemon]` picks which, and `transition_secs` how long it takes (3 by default):
+  - `sweep-in` (the default): a wave sweeps into the scene, near things first.
+  - `sweep-out`: the background goes first and the nearest things last.
+  - `morph`: everything at once, the shape of the scene a little ahead of its colours.
+  - `dissolve`: patches appear at random, nearer things tending to go first.
+  - `portal`: grows out from your cursor like a bubble in the scene, and follows it.
+  - `tide-in`: rises like water, lowest places first.
+  - `tide-out`: drains away like water, uncovering the highest places first.
+
+### Changed
+
+- Wallpapers much bigger than the screen are scaled down as they load. They draw several times faster and use far less memory.
+
 ## 0.3.0 - 2026-10-04
 
 ### Added

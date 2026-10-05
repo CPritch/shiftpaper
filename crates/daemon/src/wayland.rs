@@ -21,6 +21,7 @@ use smithay_client_toolkit::{
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
@@ -36,11 +37,12 @@ use wayland_protocols::wp::{
 };
 
 use crate::cursor::HyprlandCursor;
-use crate::renderer::{OutputRenderState, Renderer};
+use crate::renderer::{OutputRenderState, Renderer, Wallpaper};
+use crate::slideshow::Slideshow;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use shiftpaper_config::{Config, TrackingMode};
+use shiftpaper_config::{Config, TrackingMode, Transition};
 
 pub struct OutputInfo {
     pub name: String,
@@ -117,6 +119,7 @@ pub struct App {
     pub outputs: Vec<OutputInfo>,
     pub renderer: Option<Renderer>,
     pub render_targets: HashMap<String, OutputRenderState>,
+    slideshow: Option<Slideshow>,
     pub cursor: Option<HyprlandCursor>,
     pub pointer: Option<wl_pointer::WlPointer>,
     pub seat: Option<wl_seat::WlSeat>,
@@ -156,6 +159,7 @@ impl App {
         }
 
         Ok(Self {
+            slideshow: config.slideshow.clone().map(Slideshow::new),
             config,
             registry_state,
             compositor_state,
@@ -221,6 +225,8 @@ impl App {
             warn!("idle_timeout_secs changed, restart required to take effect");
         }
 
+        // Start the slideshow afresh, as its images may have changed.
+        self.slideshow = new_cfg.slideshow.clone().map(Slideshow::new);
         let renderer = match &self.renderer {
             Some(r) => r,
             None => {
@@ -229,48 +235,23 @@ impl App {
             }
         };
 
+        let (duration, style) = transition_settings(&new_cfg);
+        let screens = self.screen_sizes();
         for output in &self.outputs {
             if !output.configured {
                 continue;
             }
             if let Some(rt) = self.render_targets.get_mut(&output.name) {
-                let (Some(color_path), Some(depth_path)) = (
-                    new_cfg.color_for(&output.name),
-                    new_cfg.depth_for(&output.name),
+                let Some(wallpaper) = load_wallpaper_for(
+                    renderer,
+                    &new_cfg,
+                    self.slideshow.as_mut(),
+                    &output.name,
+                    &screens,
                 ) else {
-                    warn!(
-                        name = output.name,
-                        "reload: no wallpaper set for this output"
-                    );
                     continue;
                 };
-
-                let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(name = output.name, "reload: failed to load color: {e:#}");
-                        continue;
-                    }
-                };
-
-                let bind_group = match crate::depth::load_depth_map(&depth_path) {
-                    Ok(depth) => {
-                        let (_tex, view) = renderer.upload_depth_map(&depth);
-                        renderer.create_bind_group(&color_view, &view, &rt.uniform_buffer)
-                    }
-                    Err(e) => {
-                        warn!(name = output.name, "reload: failed to load depth: {e:#}");
-                        renderer.create_bind_group(
-                            &color_view,
-                            &renderer.depth_view,
-                            &rt.uniform_buffer,
-                        )
-                    }
-                };
-
-                rt.color_view = color_view;
-                rt.image_size = image_size;
-                rt.bind_group = bind_group;
+                rt.start_transition(renderer, wallpaper, duration, style);
                 info!(name = output.name, "reloaded wallpaper");
             }
         }
@@ -278,6 +259,57 @@ impl App {
         self.config = new_cfg;
         self.needs_render = true;
         info!("config reloaded via SIGHUP");
+    }
+
+    /// Move the slideshow on once the next slide is due and loaded. Called
+    /// from the main loop, which wakes at least twice a second. It pauses
+    /// with rendering, so slides don't change while the session is idle or
+    /// the battery is low, and it catches up when rendering resumes.
+    pub fn update_slideshow(&mut self, qh: &QueueHandle<Self>) {
+        if !self.render_allowed() {
+            return;
+        }
+        let screens = self.screen_sizes();
+        let (Some(renderer), Some(slideshow)) = (&self.renderer, &mut self.slideshow) else {
+            return;
+        };
+        let Some(next) = slideshow.poll(renderer, &screens) else {
+            return;
+        };
+
+        let (duration, style) = transition_settings(&self.config);
+        for output in &self.outputs {
+            if self.config.in_slideshow(&output.name)
+                && let Some(rt) = self.render_targets.get_mut(&output.name)
+            {
+                rt.start_transition(renderer, next.clone(), duration, style);
+            }
+        }
+        for idx in 0..self.outputs.len() {
+            self.advance(qh, idx);
+        }
+    }
+
+    /// Each screen's size in pixels, so a wallpaper bigger than they need
+    /// can be scaled down as it loads.
+    fn screen_sizes(&self) -> Vec<(u32, u32)> {
+        self.output_state
+            .outputs()
+            .filter_map(|output| self.output_state.info(&output))
+            .filter_map(|info| {
+                let mode = info.modes.iter().find(|m| m.current)?;
+                let (w, h) = mode.dimensions;
+                let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+                // A rotated screen shows the image the other way round.
+                Some(match info.transform {
+                    wl_output::Transform::_90
+                    | wl_output::Transform::_270
+                    | wl_output::Transform::Flipped90
+                    | wl_output::Transform::Flipped270 => (h, w),
+                    _ => (w, h),
+                })
+            })
+            .collect()
     }
 
     pub fn init_cursor(&mut self) {
@@ -368,6 +400,7 @@ impl App {
             surface.commit();
             o.needs_redraw = true;
         }
+        rt.finish_transition_if_done(renderer);
     }
 
     fn create_layer_surface(
@@ -390,6 +423,45 @@ impl App {
         layer_surface.commit();
         layer_surface
     }
+}
+
+/// Load what an output should show: the current slide if it's in the
+/// slideshow, else its own wallpaper or the global one. Logs why if there's
+/// nothing to show.
+///
+/// This takes the parts of `App` it needs rather than `&mut self`, so
+/// callers can hold the renderer and a render target at the same time.
+fn load_wallpaper_for(
+    renderer: &Renderer,
+    config: &Config,
+    slideshow: Option<&mut Slideshow>,
+    output_name: &str,
+    screens: &[(u32, u32)],
+) -> Option<Wallpaper> {
+    if config.in_slideshow(output_name) {
+        let wallpaper = slideshow?.current(renderer, screens);
+        if wallpaper.is_none() {
+            warn!(name = output_name, "none of the slideshow's images loaded");
+        }
+        return wallpaper;
+    }
+    let (Some(color), Some(depth)) = (config.color_for(output_name), config.depth_for(output_name))
+    else {
+        warn!(name = output_name, "no wallpaper set for this output");
+        return None;
+    };
+    renderer
+        .load_wallpaper(color, &depth, screens)
+        .inspect_err(|e| warn!(name = output_name, "{e:#}"))
+        .ok()
+}
+
+/// How long a change of wallpaper takes, and which transition it uses.
+fn transition_settings(config: &Config) -> (Duration, Transition) {
+    (
+        Duration::from_secs_f32(config.daemon.transition_secs),
+        config.daemon.transition,
+    )
 }
 
 impl CompositorHandler for App {
@@ -626,56 +698,17 @@ impl LayerShellHandler for App {
 
             surface.configure(&renderer.device, &surface_config);
 
-            let (Some(color_path), Some(depth_path)) = (
-                self.config.color_for(&output_name),
-                self.config.depth_for(&output_name),
+            let screens = self.screen_sizes();
+            let Some(wallpaper) = load_wallpaper_for(
+                renderer,
+                &self.config,
+                self.slideshow.as_mut(),
+                &output_name,
+                &screens,
             ) else {
-                warn!(name = output_name, "no wallpaper set for this output");
                 return;
             };
-
-            let (color_view, image_size) = match renderer.load_wallpaper_texture(color_path) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("failed to load color texture: {e:#}");
-                    return;
-                }
-            };
-
-            let uniform_buffer = renderer.create_uniform_buffer();
-
-            let bind_group = match crate::depth::load_depth_map(&depth_path) {
-                Ok(depth) => {
-                    let (_tex, view) = renderer.upload_depth_map(&depth);
-                    info!(
-                        name = output_name,
-                        w = depth.width,
-                        h = depth.height,
-                        path = %depth_path.display(),
-                        "depth map loaded"
-                    );
-                    renderer.create_bind_group(&color_view, &view, &uniform_buffer)
-                }
-                Err(e) => {
-                    warn!(
-                        path = %depth_path.display(),
-                        "failed to load depth map, using flat placeholder: {e:#}"
-                    );
-                    renderer.create_bind_group(&color_view, &renderer.depth_view, &uniform_buffer)
-                }
-            };
-
-            let render_state = OutputRenderState {
-                surface,
-                config: surface_config,
-                bind_group,
-                color_view,
-                image_size,
-                uniform_buffer,
-                current_offset: (0.0, 0.0),
-                target_offset: (0.0, 0.0),
-            };
-
+            let render_state = OutputRenderState::new(renderer, surface, surface_config, wallpaper);
             self.render_targets
                 .insert(output_name.clone(), render_state);
             info!(

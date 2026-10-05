@@ -4,6 +4,7 @@ mod cursor;
 mod depth;
 mod idle;
 mod renderer;
+mod slideshow;
 mod wayland;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,8 @@ use tracing_subscriber::EnvFilter;
 use wayland_client::Connection;
 
 const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+// The longest the main loop sleeps, so it notices signals and slideshow
+// changes promptly.
 const SIGNAL_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -151,6 +154,8 @@ fn main() -> Result<()> {
             info!("received SIGHUP, reloading config");
             app.reload_config();
         }
+
+        app.update_slideshow(&qh);
 
         if app.needs_render {
             app.needs_render = false;
