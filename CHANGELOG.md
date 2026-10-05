@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-05
 
 ### Added
 
 - Slideshows. `shiftpaper slideshow` bakes a set of images, or folders of them, and the daemon moves through them on a timer, in order or with `--shuffle`. They pause while idle or on low battery, and `shiftpaper slideshow --stop` keeps whichever image is showing.
-- Transitions. Changing wallpaper, whether by slideshow or `shiftpaper set` and a reload, morphs from one to the next through the depth of the scene, and the parallax carries on throughout. `shiftpaper transition <name> [--secs N]` picks which and how long it takes (3 seconds by default), and `shiftpaper transition --help` describes them all:
+- Transitions. Changing wallpaper, whether by slideshow or `shiftpaper set`, morphs from one to the next through the depth of the scene, and the parallax carries on throughout. `shiftpaper transition <name> [--secs N]` picks which and how long it takes (3 seconds by default), or set `transition` and `transition_secs` under `[daemon]`. `shiftpaper transition --help` describes them all:
   - `sweep-in` (the default): a wave sweeps into the scene, near things first.
   - `sweep-out`: the background goes first and the nearest things last.
   - `morph`: everything at once, the shape of the scene a little ahead of its colours.
@@ -13,12 +13,19 @@
   - `portal`: grows out from your cursor like a bubble in the scene, and follows it.
   - `tide-in`: rises like water, lowest places first.
   - `tide-out`: drains away like water, uncovering the highest places first.
+- An icon, shown in the README and installed by the AUR packages.
 
 ### Changed
 
 - `set` and `slideshow` apply straight away: they tell a running shiftpaperd to reload, so there's no `systemctl --user reload` to run.
 - Changing wallpaper no longer freezes the parallax while a big image loads: it loads in the background, and only once however many monitors show it. Settings changes that don't change the wallpaper don't reload it.
 - Wallpapers much bigger than the screen are scaled down as they load. They draw several times faster and use far less memory.
+- Config values that parse but can't work, like a negative `transition_secs`, are reported when the config loads.
+
+### Fixed
+
+- Idle detection never started, so the daemon kept rendering while you were away.
+- The `shiftpaper-git` AUR page still said 0.2.0. Each release now keeps it current.
 
 ## 0.3.0 - 2026-10-04
 
