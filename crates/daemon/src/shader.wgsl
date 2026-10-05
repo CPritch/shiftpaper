@@ -96,6 +96,49 @@ fn transition_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
     return 1.0 - smoothstep(plane - BAND, plane + BAND, distance);
 }
 
+// Linear sRGB to Oklab, from https://bottosson.github.io/posts/oklab/
+fn to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let lms = vec3<f32>(
+        dot(c, vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929)),
+        dot(c, vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566)),
+        dot(c, vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005)),
+    );
+    let l = pow(max(lms, vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0));
+    return vec3<f32>(
+        dot(l, vec3<f32>(0.2104542553, 0.7936177850, -0.0040720468)),
+        dot(l, vec3<f32>(1.9779984951, -2.4285922050, 0.4505937099)),
+        dot(l, vec3<f32>(0.0259040371, 0.7827717662, -0.8086757660)),
+    );
+}
+
+fn from_oklab(lab: vec3<f32>) -> vec3<f32> {
+    let l = vec3<f32>(
+        dot(lab, vec3<f32>(1.0, 0.3963377774, 0.2158037573)),
+        dot(lab, vec3<f32>(1.0, -0.1055613458, -0.0638541728)),
+        dot(lab, vec3<f32>(1.0, -0.0894841775, -1.2914855480)),
+    );
+    let lms = l * l * l;
+    return vec3<f32>(
+        dot(lms, vec3<f32>(4.0767416621, -3.3077115913, 0.2309699292)),
+        dot(lms, vec3<f32>(-1.2684380046, 2.6097574011, -0.3413193965)),
+        dot(lms, vec3<f32>(-0.0041960771, -0.7034186147, 1.7076147010)),
+    );
+}
+
+// Mix two colours in Oklab, where halfway between them looks halfway to
+// the eye. Mixing the light itself lets a bright picture swamp a dark one,
+// so a fade looks lopsided.
+fn mix_oklab(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    let lab = mix(to_oklab(a.rgb), to_oklab(b.rgb), t);
+    return vec4<f32>(clamp(from_oklab(lab), vec3<f32>(0.0), vec3<f32>(1.0)), mix(a.a, b.a, t));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = crop(in.uv, u.uv_scale);
@@ -117,5 +160,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let shift = u.cursor_offset * depth * u.intensity;
     let color = textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
     let next_color = textureSample(next_color_tex, tex_sampler, next_uv - shift * u.next_uv_scale);
-    return mix(color, next_color, weight);
+    return mix_oklab(color, next_color, weight);
 }
