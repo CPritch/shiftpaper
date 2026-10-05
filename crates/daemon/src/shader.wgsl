@@ -1,5 +1,5 @@
-// Fullscreen depth-based parallax shader, with depth-ordered transitions
-// between two wallpapers.
+// Fullscreen depth-based parallax shader, with transitions between two
+// wallpapers that work through the depth of the scene.
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -24,7 +24,8 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 // no transition is running.
 @group(0) @binding(4) var next_color_tex: texture_2d<f32>;
 @group(0) @binding(5) var next_depth_tex: texture_2d<f32>;
-// Each wallpaper's depth ranks, from `DepthMap::ranks`.
+// Each wallpaper's depth and height ranks, from `DepthMap::ranks` and
+// `DepthMap::height_ranks`.
 @group(0) @binding(6) var ranks: texture_1d<f32>;
 @group(0) @binding(7) var next_ranks: texture_1d<f32>;
 
@@ -66,7 +67,7 @@ const PORTAL: u32 = 5u;
 const TIDE_IN: u32 = 6u;
 const TIDE_OUT: u32 = 7u;
 
-// The portal's settings, in screen heights. Must match renderer.rs.
+// The portal's settings, explained in renderer.rs. Must match it.
 const TRAIL_POINTS: u32 = 32u;
 const PORTAL_DEPTH: f32 = 1.0;
 const PORTAL_EDGE: f32 = 0.04;
@@ -77,14 +78,14 @@ const HORIZON: f32 = 0.5;
 const TIDE_NEAR: f32 = 0.1;
 // Just under the tide's surface the water ripples and darkens a little.
 // How far down that goes, in height rank, how far the ripple moves the
-// picture, in screen heights, and how much darker it gets at the surface.
+// picture, as a fraction of it, and how much darker it gets at the surface.
 const WATER_DEPTH: f32 = 0.15;
 const RIPPLE: f32 = 0.0025;
 const WATER_SHADE: f32 = 0.18;
 
-// Half the width of the slice of depth ranks that is part way through
-// switching at any moment. Narrower gives a crisper wavefront, wider a
-// softer dissolve.
+// Half the width of the band of ranks part way through switching at any
+// moment, in the sweeps, the dissolve and the tide. Narrower gives a
+// crisper edge, wider a softer one.
 const BAND: f32 = 0.08;
 
 // Crop to the screen's aspect ratio and apply the margin.

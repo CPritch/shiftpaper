@@ -23,12 +23,15 @@ struct Uniforms {
     style: u32,
     /// The screen's width over its height.
     aspect: f32,
+    /// The portal's trail: how many points are in use, how fast their
+    /// bubbles grow, and the points themselves, from `Trail`.
     trail_len: u32,
     portal_speed: f32,
     trail: [[f32; 4]; TRAIL_POINTS],
 }
 
-/// How many cursor positions a portal transition follows.
+/// How many cursor positions a portal transition follows. Must match
+/// TRAIL_POINTS in shader.wgsl.
 const TRAIL_POINTS: usize = 32;
 /// How far the cursor moves, in screen heights, before the portal grows
 /// from a new point.
@@ -315,7 +318,7 @@ fn shader_style(style: Transition) -> u32 {
     }
 }
 
-/// How far through a transition we are, eased in and out so the sweep
+/// How far through a transition we are, eased in and out so it
 /// starts and settles gently. Reaches exactly 1 once `duration` has passed.
 fn transition_progress(elapsed: Duration, duration: Duration) -> f32 {
     if duration.is_zero() {
