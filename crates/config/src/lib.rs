@@ -83,6 +83,9 @@ pub enum Transition {
     /// Patches of the new wallpaper appear at random, nearer things
     /// tending to go first.
     Dissolve,
+    /// The new wallpaper grows out from the cursor like a bubble in the
+    /// scene, following it if it moves.
+    Portal,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -518,6 +521,7 @@ mod tests {
             ("all-at-once", Transition::AllAtOnce),
             ("flatten", Transition::Flatten),
             ("dissolve", Transition::Dissolve),
+            ("portal", Transition::Portal),
         ] {
             let cfg = parse(&format!("[daemon]\ntransition = \"{text}\""));
             assert_eq!(cfg.daemon.transition, transition);

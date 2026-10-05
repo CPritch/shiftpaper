@@ -42,6 +42,13 @@ struct Uniforms {
     style: u32,
     // The screen's width over its height.
     aspect: f32,
+    // Where the cursor has been in a portal transition: screen uv, then the
+    // progress when it was there. The first `trail_len` are in use.
+    trail_len: u32,
+    // How fast each of the portal's bubbles grows, in screen heights over
+    // the whole transition.
+    portal_speed: f32,
+    trail: array<vec4<f32>, TRAIL_POINTS>,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
@@ -55,6 +62,12 @@ const FAR_FIRST: u32 = 1u;
 const ALL_AT_ONCE: u32 = 2u;
 const FLATTEN: u32 = 3u;
 const DISSOLVE: u32 = 4u;
+const PORTAL: u32 = 5u;
+
+// The portal's settings, in screen heights. Must match renderer.rs.
+const TRAIL_POINTS: u32 = 32u;
+const PORTAL_DEPTH: f32 = 1.0;
+const PORTAL_EDGE: f32 = 0.04;
 
 // Half the width of the slice of depth ranks that is part way through
 // switching at any moment. Narrower gives a crisper wavefront, wider a
@@ -136,6 +149,29 @@ fn blobs(screen_uv: vec2<f32>) -> f32 {
     return 0.7 * value_noise(p) + 0.3 * value_noise(p * 3.1 + 17.0);
 }
 
+// How far a pixel has switched in a portal. The new wallpaper grows like
+// a bubble in the scene from each point on the cursor's trail, so it
+// spreads across the surface under the cursor first and has to wrap round
+// things nearer or further away.
+fn portal_weight(screen_uv: vec2<f32>, rank: f32, t: f32) -> f32 {
+    var weight = 0.0;
+    for (var i = 0u; i < u.trail_len && weight < 1.0; i += 1u) {
+        let point = u.trail[i];
+        let radius = (t - point.z) * u.portal_speed - PORTAL_EDGE;
+        let across = (screen_uv - point.xy) * vec2<f32>(u.aspect, 1.0);
+        // Depth only adds distance, so a bubble that can't reach this far
+        // across the screen can be skipped before looking up its depth.
+        if length(across) >= radius + PORTAL_EDGE {
+            continue;
+        }
+        let point_rank = depth_rank(ranks, load_depth(depth_tex, crop(point.xy, u.uv_scale)));
+        let offset = vec3<f32>(across, (rank - point_rank) * PORTAL_DEPTH);
+        let inside = 1.0 - smoothstep(radius - PORTAL_EDGE, radius + PORTAL_EDGE, length(offset));
+        weight = max(weight, inside);
+    }
+    return weight;
+}
+
 // How far a pixel has changed into the next wallpaper, for its colour and
 // its depth separately, and how much depth the scene has right now.
 struct Blend {
@@ -160,6 +196,10 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
         // Half depth order, near first, and half random blobs.
         let next_rank = depth_rank(next_ranks, next_depth);
         let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
+        return Blend(weight, weight, 1.0);
+    }
+    if u.style == PORTAL {
+        let weight = portal_weight(screen_uv, depth_rank(ranks, depth), t);
         return Blend(weight, weight, 1.0);
     }
     let weight = sweep_weight(depth, next_depth, t);
