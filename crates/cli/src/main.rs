@@ -1,5 +1,6 @@
 mod cache;
 mod config;
+mod daemon;
 mod depth;
 mod fetch_model;
 mod moge;
@@ -55,9 +56,9 @@ enum Command {
     /// Bake an image and set it as the active wallpaper.
     ///
     /// Performs the same baking as `bake`, then points the daemon's
-    /// config.toml at it, replacing any slideshow. Reload the daemon to
-    /// show it. The resolved model path is also persisted to [inference]
-    /// so future invocations don't need --model.
+    /// config.toml at it, replacing any slideshow, and a running daemon
+    /// changes to it. The resolved model path is also persisted to
+    /// [inference] so future invocations don't need --model.
     Set {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
@@ -72,8 +73,8 @@ enum Command {
     ///
     /// Bakes each image like `set` does, then lists them in config.toml's
     /// [slideshow]. A folder adds the images directly inside it, in name
-    /// order. Reload the daemon to start the slideshow. --stop, or `set`,
-    /// goes back to a single wallpaper.
+    /// order. A running daemon starts the slideshow straight away. --stop,
+    /// or `set`, goes back to a single wallpaper.
     Slideshow {
         /// Source images (jpeg, png, or webp), or folders of them.
         #[arg(required_unless_present = "stop")]
@@ -240,14 +241,19 @@ fn set(input: &Path, model: &Path) -> Result<()> {
     print_paths(&paths);
     update_daemon_config(&paths, model)?;
     eprintln!();
-    eprintln!("wallpaper set. reload the daemon to apply:");
-    print_reload_hint();
+    tell_daemon("wallpaper set", "shiftpaperd is changing to it");
     Ok(())
 }
 
-fn print_reload_hint() {
-    eprintln!("  systemctl --user reload shiftpaperd");
-    eprintln!("  # or: kill -HUP $(pidof shiftpaperd)");
+/// Say what changed and reload a running shiftpaperd so it takes effect,
+/// or say how to start one.
+fn tell_daemon(done: &str, happening: &str) {
+    if daemon::reload() > 0 {
+        eprintln!("{done}. {happening}.");
+    } else {
+        eprintln!("{done}. shiftpaperd isn't running, so start it to see it:");
+        eprintln!("  systemctl --user enable --now shiftpaperd");
+    }
 }
 
 fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, shuffle: bool, model: &Path) -> Result<()> {
@@ -266,11 +272,10 @@ fn slideshow(inputs: &[PathBuf], interval: NonZeroU32, shuffle: bool, model: &Pa
     update_slideshow_config(&baked, interval, shuffle, model)?;
     eprintln!();
     let plural = if baked.len() == 1 { "" } else { "s" };
-    eprintln!(
-        "slideshow of {} image{plural} set. reload the daemon to start it:",
-        baked.len()
+    tell_daemon(
+        &format!("slideshow of {} image{plural} set", baked.len()),
+        "shiftpaperd is starting it",
     );
-    print_reload_hint();
     Ok(())
 }
 
@@ -282,8 +287,10 @@ fn stop_slideshow() -> Result<()> {
     };
     let (color, depth) = slideshow.slide(slideshow.due(SystemTime::now()));
     config::edit(|doc| write_wallpaper(doc, color, &depth))?;
-    eprintln!("slideshow stopped on the image it was showing. reload the daemon to apply:");
-    print_reload_hint();
+    tell_daemon(
+        "slideshow stopped",
+        "shiftpaperd is keeping the image it was showing",
+    );
     Ok(())
 }
 

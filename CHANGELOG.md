@@ -16,6 +16,7 @@
 
 ### Changed
 
+- `set` and `slideshow` apply straight away: they tell a running shiftpaperd to reload, so there's no `systemctl --user reload` to run.
 - Wallpapers much bigger than the screen are scaled down as they load. They draw several times faster and use far less memory.
 
 ## 0.3.0 - 2026-10-04
