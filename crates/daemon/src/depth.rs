@@ -41,11 +41,11 @@ impl DepthMap {
         }
     }
 
-    /// The fraction of the map's pixels farther away than each of 257
-    /// evenly spaced depths, from 0 (the farthest) to 1 (the nearest).
+    /// Roughly the fraction of the map's pixels farther away than each of
+    /// 257 evenly spaced depths, from 0 (the farthest) to 1 (the nearest).
     /// Transitions sweep through this rank instead of raw depth, so they
-    /// change a similar amount of the picture at every moment, however
-    /// the scene's depths are spread out.
+    /// change a similar amount of the picture at every moment, however the
+    /// scene's depths are spread out. See `cumulative` for the rough part.
     pub fn ranks(&self) -> Vec<f32> {
         let mut counts = [0u32; RANK_POINTS - 1];
         for &d in &self.data {
@@ -89,13 +89,23 @@ pub fn tide_height(y: f32, depth: f32) -> f32 {
     height / (1.0 + height.abs())
 }
 
+/// The most of a transition any one slice of depth or height can take, as
+/// a fraction of the picture.
+const SLICE_CAP: f32 = 0.02;
+
 /// Running totals of `counts` as fractions of the whole, starting from 0.
+/// Each slice counts for no more than SLICE_CAP of the picture. A big area
+/// all at one depth, like a sky the model marks as infinitely far, would
+/// otherwise get a share of the transition to match its size, but it all
+/// switches at the same moment, so the rest of that share is a pause.
 fn cumulative(counts: &[u32]) -> Vec<f32> {
-    let total = counts.iter().sum::<u32>().max(1) as f32;
+    let cap = ((counts.iter().sum::<u32>() as f32 * SLICE_CAP).ceil() as u32).max(1);
+    let capped: Vec<u32> = counts.iter().map(|&n| n.min(cap)).collect();
+    let total = capped.iter().sum::<u32>().max(1) as f32;
     let mut sum = 0;
     let mut ranks = Vec::with_capacity(counts.len() + 1);
     ranks.push(0.0);
-    for &n in counts {
+    for n in capped {
         sum += n;
         ranks.push(sum as f32 / total);
     }
@@ -149,11 +159,21 @@ mod tests {
 
     #[test]
     fn ranks_follow_where_pixels_are() {
-        // Three quarters of the pixels are far away, so the rank climbs to
-        // 0.75 within the first band of depths.
-        let ranks = map(vec![0, 0, 0, 65535]).ranks();
-        assert_eq!(ranks[1], 0.75);
-        assert_eq!(ranks[255], 0.75);
-        assert_eq!(ranks[256], 1.0);
+        // 100 pixels spread evenly over 100 depths, so each takes 1%.
+        let ranks = map((0..100).map(|i| i * 650).collect()).ranks();
+        assert!((ranks[128] - 0.51).abs() < 0.02, "{}", ranks[128]);
+    }
+
+    #[test]
+    fn one_depth_takes_only_a_moment() {
+        // A sky at depth 0 covers half the picture, and the other half is
+        // spread over 100 depths. The sky still all switches together, but
+        // takes a sliver of the transition rather than half of it, so the
+        // sweep doesn't idle through it.
+        let mut data = vec![0; 100];
+        data.extend((0..100).map(|i| 1000 + i * 640));
+        let ranks = map(data).ranks();
+        let sky = ranks[1] - ranks[0];
+        assert!(sky < 0.05, "the sky takes {sky}");
     }
 }
