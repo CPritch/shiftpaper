@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-10-06
+
+### Fixed
+
+- 0.4.1 reported its version as 0.4.0.
+
 ## 0.4.1 - 2026-10-06
 
 ### Added
