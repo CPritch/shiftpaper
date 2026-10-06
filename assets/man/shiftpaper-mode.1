@@ -1,0 +1,40 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-mode 1  shiftpaper 
+.SH NAME
+shiftpaper\-mode \- Show or change the cursor tracking mode
+.SH SYNOPSIS
+\fBshiftpaper mode\fR [\fB\-h\fR|\fB\-\-help\fR] [\fIMODE\fR] 
+.SH DESCRIPTION
+Show or change the cursor tracking mode.
+.PP
+Pointer mode (the default) uses Wayland\*(Aqs native pointer events. It works on any wlr\-layer\-shell compositor, and the daemon only draws while the cursor is over visible desktop, which saves battery.
+.PP
+Hyprland mode reads the global cursor position from the Hyprland IPC socket. Parallax remains responsive even when windows cover the desktop, at the cost of being Hyprland\-specific. Note that Hyprland mode lets the daemon observe cursor positions over arbitrary windows, which is a minor privacy consideration.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fIMODE\fR]
+Tracking mode to set. Omit to print the current value
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+pointer: Wayland\-native pointer events. Default. Works on any wlr\-layer\-shell compositor; renders only when the cursor is over visible desktop
+.IP \(bu 2
+hyprland: Hyprland IPC global cursor polling. Hyprland\-only; sees the cursor even when windows cover the desktop
+.RE
+.SH EXAMPLES
+.nf
+shiftpaper mode            Print the current mode
+shiftpaper mode hyprland   Follow the cursor over windows too (Hyprland only)
+shiftpaper mode pointer    Go back to the default
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

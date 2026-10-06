@@ -37,4 +37,6 @@ indicatif = "0.18"
 nix = { version = "0.31", features = ["signal"] }
 
 [dev-dependencies]
+clap_complete = "4.6.11"
+shiftpaper-config = { workspace = true, features = ["man"] }
 tempfile = "3"

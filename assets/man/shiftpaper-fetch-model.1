@@ -1,0 +1,34 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-fetch-model 1  shiftpaper 
+.SH NAME
+shiftpaper\-fetch\-model \- Download a depth model to bake with
+.SH SYNOPSIS
+\fBshiftpaper fetch\-model\fR [\fB\-\-list\fR] [\fB\-f\fR|\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fINAME\fR] 
+.SH DESCRIPTION
+Download a depth model to bake with.
+.PP
+Downloads from HuggingFace and makes it the model `set`, `slideshow` and `bake` use. Without a name, downloads the default model. Files go to ~/.local/share/shiftpaper/models/<name>/ and the path is written to [inference] model_path in config.toml. Safe to re\-run: the download is skipped if the files already exist, unless \-\-force is given. Each model\*(Aqs weights have their own licence, shown before downloading.
+.SH OPTIONS
+.TP
+\fB\-\-list\fR
+List the models that can be downloaded
+.TP
+\fB\-f\fR, \fB\-\-force\fR
+Re\-download even if the files already exist
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fINAME\fR]
+Which model to download. See \-\-list
+.SH EXAMPLES
+.nf
+shiftpaper fetch\-model               Download the default model
+shiftpaper fetch\-model \-\-list        List the models and their sizes
+shiftpaper fetch\-model moge\-2\-vits   Download a smaller, faster model
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

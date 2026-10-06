@@ -8,9 +8,13 @@ license.workspace = true
 [features]
 # Lets the CLI take TrackingMode directly as a command-line argument.
 clap = ["dep:clap"]
+# Man page helpers for the CLI's and daemon's tests, which check the pages
+# in assets/man are current.
+man = ["clap", "dep:clap_mangen"]
 
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
 toml = "1"
 clap = { version = "4", features = ["derive"], optional = true }
+clap_mangen = { version = "0.3.3", optional = true }

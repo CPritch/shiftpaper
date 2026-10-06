@@ -1,0 +1,52 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-transition 1  shiftpaper 
+.SH NAME
+shiftpaper\-transition \- Show or change how one wallpaper changes into the next
+.SH SYNOPSIS
+\fBshiftpaper transition\fR [\fB\-s\fR|\fB\-\-secs\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fINAME\fR] 
+.SH DESCRIPTION
+Show or change how one wallpaper changes into the next.
+.PP
+Applies to every change of wallpaper, from `set` or a slideshow, and a running daemon picks it up straight away. With no arguments, prints the current transition and how long it takes.
+.SH OPTIONS
+.TP
+\fB\-s\fR, \fB\-\-secs\fR \fI<SECS>\fR
+How long it takes, in seconds, like 3 or 1.5
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fINAME\fR]
+The transition to use
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+sweep\-in: A wave sweeps into the scene: the new wallpaper\*(Aqs nearest things appear first, in front of the old one, and it fills in towards the distance
+.IP \(bu 2
+sweep\-out: A wave sweeps out of the scene: the old wallpaper\*(Aqs background gives way to the new one first, and its nearest things go last
+.IP \(bu 2
+morph: Everything changes together, the shape of the scene a little ahead of its colours
+.IP \(bu 2
+dissolve: Patches of the new wallpaper appear at random, nearer things tending to go first
+.IP \(bu 2
+portal: The new wallpaper grows out from the cursor like a bubble in the scene, following it if it moves
+.IP \(bu 2
+tide\-in: The new wallpaper rises through the old like a tide coming in, lowest places first
+.IP \(bu 2
+tide\-out: The old wallpaper drains away like a tide going out, uncovering the new one from the highest places down
+.RE
+.SH EXAMPLES
+.nf
+shiftpaper transition                Print the current transition
+shiftpaper transition portal         Use portal
+shiftpaper transition tide\-in \-s 5   Use tide\-in, taking 5 seconds
+shiftpaper transition \-\-secs 1.5     Keep the transition, change its length
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

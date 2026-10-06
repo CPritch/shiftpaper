@@ -53,7 +53,8 @@ Signals:
   SIGHUP           Reload config.toml. shiftpaper sends this after a change.
   SIGTERM, SIGINT  Exit.
 
-Logs go to stderr. RUST_LOG=shiftpaperd=debug shows more."
+Environment:
+  RUST_LOG   How much to log, to stderr. shiftpaperd=debug shows more."
 )]
 struct Args {}
 
@@ -227,6 +228,14 @@ fn install_signal_handlers() {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn generated_files_are_current() {
+        use shiftpaper_config::man;
+
+        let page = man::page(&Args::command(), &["shiftpaper(1)"]);
+        man::check(&[("man/shiftpaperd.1".to_string(), page)]);
+    }
 
     #[test]
     fn args_definition_is_valid() {

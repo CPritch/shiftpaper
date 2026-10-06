@@ -1,0 +1,33 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-bake 1  shiftpaper 
+.SH NAME
+shiftpaper\-bake \- Bake a source image into a color + 16\-bit depth PNG pair
+.SH SYNOPSIS
+\fBshiftpaper bake\fR [\fB\-o\fR|\fB\-\-out\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
+.SH DESCRIPTION
+Bake a source image into a color + 16\-bit depth PNG pair.
+.PP
+Runs the depth model on the source image and writes a pair of files (`<hash>.color.png` and `<hash>.depth16.png`) to the cache directory or the directory specified by \-\-out, printing their paths. Baking the same image again reuses the existing pair. `set` and `slideshow` bake for you, so this is only needed to bake without changing the wallpaper.
+.SH OPTIONS
+.TP
+\fB\-o\fR, \fB\-\-out\fR \fI<OUT>\fR
+Output directory. Defaults to the shiftpaper cache directory at $XDG_CACHE_HOME/shiftpaper/wallpapers
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
+Path to the ONNX depth model. Falls back to $SHIFTPAPER_MODEL, then [inference] model_path in config.toml
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIINPUT\fR>
+Source image (jpeg, png, or webp)
+.SH EXAMPLES
+.nf
+shiftpaper bake photo.jpg                 Bake into the cache
+shiftpaper bake photo.jpg \-\-out ~/walls   Bake into a folder of your own
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

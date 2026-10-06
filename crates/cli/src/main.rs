@@ -564,6 +564,40 @@ mod tests {
     }
 
     #[test]
+    fn generated_files_are_current() {
+        use clap_complete::Shell;
+        use shiftpaper_config::man;
+
+        let mut cli = Cli::command().disable_help_subcommand(true);
+        cli.build();
+        let mut files = vec![(
+            "man/shiftpaper.1".to_string(),
+            man::page(&cli, &["shiftpaperd(1)"]),
+        )];
+        for command in cli.get_subcommands() {
+            // Building named each subcommand like shiftpaper-set.
+            let name = command.get_display_name().unwrap();
+            files.push((
+                format!("man/{name}.1"),
+                man::page(command, &["shiftpaper(1)"]),
+            ));
+        }
+        for (shell, name) in [
+            (Shell::Bash, "shiftpaper.bash"),
+            (Shell::Zsh, "_shiftpaper"),
+            (Shell::Fish, "shiftpaper.fish"),
+        ] {
+            let mut out = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "shiftpaper", &mut out);
+            files.push((
+                format!("completions/{name}"),
+                String::from_utf8(out).unwrap(),
+            ));
+        }
+        man::check(&files);
+    }
+
+    #[test]
     fn slideshow_needs_images_unless_stopping() {
         assert!(parse(&["slideshow"]).is_err());
         assert!(parse(&["slideshow", "--stop"]).is_ok());

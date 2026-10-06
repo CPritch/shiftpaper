@@ -39,5 +39,6 @@ pollster = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 
 [dev-dependencies]
+shiftpaper-config = { workspace = true, features = ["man"] }
 # Same version wgpu uses internally, to validate shader.wgsl in tests.
 naga = { version = "30", features = ["wgsl-in"] }

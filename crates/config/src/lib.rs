@@ -8,6 +8,8 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "man")]
+pub mod man;
 mod shuffle;
 
 #[derive(Debug, Deserialize, Clone)]
