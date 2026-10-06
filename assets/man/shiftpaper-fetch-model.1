@@ -1,0 +1,34 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-fetch-model 1  shiftpaper 
+.SH NAME
+shiftpaper\-fetch\-model \- Download a depth model to bake with
+.SH SYNOPSIS
+\fBshiftpaper fetch\-model\fR [\fB\-\-list\fR] [\fB\-f\fR|\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fINAME\fR] 
+.SH DESCRIPTION
+Download a depth model to bake with.
+.PP
+Downloads it from HuggingFace into ~/.local/share/shiftpaper/models/ and makes it the one `set`, `slideshow` and `bake` use. Without a name, it gets the default. A model that\*(Aqs already there isn\*(Aqt downloaded again unless you add \-\-force. Each model has its own licence, shown before it downloads.
+.SH OPTIONS
+.TP
+\fB\-\-list\fR
+List the models that can be downloaded
+.TP
+\fB\-f\fR, \fB\-\-force\fR
+Re\-download even if the files already exist
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fINAME\fR]
+Which model to download. See \-\-list
+.SH EXAMPLES
+.nf
+shiftpaper fetch\-model               Download the default model
+shiftpaper fetch\-model \-\-list        List the models and their sizes
+shiftpaper fetch\-model moge\-2\-vits   Download a smaller, faster model
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

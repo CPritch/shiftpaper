@@ -35,7 +35,10 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 nix = { version = "0.31", features = ["signal"] }
 pollster = "1"
+# Only for --help and --version, which would otherwise start the daemon.
+clap = { version = "4", features = ["derive", "wrap_help"] }
 
 [dev-dependencies]
+shiftpaper-config = { workspace = true, features = ["man"] }
 # Same version wgpu uses internally, to validate shader.wgsl in tests.
 naga = { version = "30", features = ["wgsl-in"] }

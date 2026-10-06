@@ -1,0 +1,33 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-bake 1  shiftpaper 
+.SH NAME
+shiftpaper\-bake \- Bake an image without setting it
+.SH SYNOPSIS
+\fBshiftpaper bake\fR [\fB\-o\fR|\fB\-\-out\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
+.SH DESCRIPTION
+Bake an image without setting it.
+.PP
+Runs the depth model on the image and writes a colour PNG and a 16\-bit depth PNG, `<hash>.color.png` and `<hash>.depth16.png`, to the cache or to \-\-out, then prints their paths. Baking the same image again reuses them. `set` and `slideshow` bake for you, so you only need this for an image you\*(Aqll put in config.toml yourself, like one for a single monitor.
+.SH OPTIONS
+.TP
+\fB\-o\fR, \fB\-\-out\fR \fI<OUT>\fR
+Where to write the files. Defaults to the cache, ~/.cache/shiftpaper/wallpapers
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
+The ONNX depth model to bake with. Defaults to $SHIFTPAPER_MODEL, then the one in config.toml
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIINPUT\fR>
+Source image (jpeg, png, or webp)
+.SH EXAMPLES
+.nf
+shiftpaper bake photo.jpg                 Bake into the cache
+shiftpaper bake photo.jpg \-\-out ~/walls   Bake into a folder of your own
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

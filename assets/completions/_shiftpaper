@@ -1,0 +1,243 @@
+#compdef shiftpaper
+
+autoload -U is-at-least
+
+_shiftpaper() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_shiftpaper_commands" \
+"*::: :->shiftpaper" \
+&& ret=0
+    case $state in
+    (shiftpaper)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:shiftpaper-command-$line[1]:"
+        case $line[1] in
+            (fetch-model)
+_arguments "${_arguments_options[@]}" : \
+'()--list[List the models that can be downloaded]' \
+'-f[Re-download even if the files already exist]' \
+'--force[Re-download even if the files already exist]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::name -- Which model to download. See --list:_default' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'-m+[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml. Whichever is used is saved for next time]:MODEL:_files' \
+'--model=[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml. Whichever is used is saved for next time]:MODEL:_files' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':input -- Source image (jpeg, png, or webp):_files' \
+&& ret=0
+;;
+(slideshow)
+_arguments "${_arguments_options[@]}" : \
+'-i+[How long each image shows for, like 90s, 10m or 1h]:INTERVAL:_default' \
+'--interval=[How long each image shows for, like 90s, 10m or 1h]:INTERVAL:_default' \
+'-m+[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml]:MODEL:_files' \
+'--model=[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml]:MODEL:_files' \
+'-s[Show the images in a random order, different each time round]' \
+'--shuffle[Show the images in a random order, different each time round]' \
+'(-i --interval -s --shuffle)--stop[Stop the slideshow, keeping the image it'\''s showing]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::inputs -- Source images (jpeg, png, or webp), or folders of them:_files' \
+&& ret=0
+;;
+(transition)
+_arguments "${_arguments_options[@]}" : \
+'-s+[How long it takes, in seconds, like 3 or 1.5]:SECS:_default' \
+'--secs=[How long it takes, in seconds, like 3 or 1.5]:SECS:_default' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::name -- The transition to use:((sweep-in\:"A wave sweeps into the scene\: the new wallpaper'\''s nearest things appear first, in front of the old one, and it fills in towards the distance"
+sweep-out\:"A wave sweeps out of the scene\: the old wallpaper'\''s background gives way to the new one first, and its nearest things go last"
+morph\:"Everything changes together, the shape of the scene a little ahead of its colours"
+dissolve\:"Patches of the new wallpaper appear at random, nearer things tending to go first"
+portal\:"The new wallpaper grows out from the cursor like a bubble in the scene, following it if it moves"
+tide-in\:"The new wallpaper rises through the old like a tide coming in, lowest places first"
+tide-out\:"The old wallpaper drains away like a tide going out, uncovering the new one from the highest places down"))' \
+&& ret=0
+;;
+(mode)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::mode -- The mode to switch to. Leave it out to print the current one:((pointer\:"The default. Works on any compositor, and moves only while the cursor is over the desktop"
+hyprland\:"Follows the cursor over windows too. Hyprland only"))' \
+&& ret=0
+;;
+(bake)
+_arguments "${_arguments_options[@]}" : \
+'-o+[Where to write the files. Defaults to the cache, ~/.cache/shiftpaper/wallpapers]:OUT:_files' \
+'--out=[Where to write the files. Defaults to the cache, ~/.cache/shiftpaper/wallpapers]:OUT:_files' \
+'-m+[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml]:MODEL:_files' \
+'--model=[The ONNX depth model to bake with. Defaults to \$SHIFTPAPER_MODEL, then the one in config.toml]:MODEL:_files' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':input -- Source image (jpeg, png, or webp):_files' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_shiftpaper__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:shiftpaper-help-command-$line[1]:"
+        case $line[1] in
+            (fetch-model)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(slideshow)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(transition)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mode)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(bake)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_shiftpaper_commands] )) ||
+_shiftpaper_commands() {
+    local commands; commands=(
+'fetch-model:Download a depth model to bake with' \
+'set:Bake an image and make it the wallpaper' \
+'slideshow:Bake several images and show them in turn' \
+'transition:Show or change how one wallpaper changes into the next' \
+'mode:Show or change the cursor tracking mode' \
+'bake:Bake an image without setting it' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'shiftpaper commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__bake_commands] )) ||
+_shiftpaper__subcmd__bake_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper bake commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__fetch-model_commands] )) ||
+_shiftpaper__subcmd__fetch-model_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper fetch-model commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help_commands] )) ||
+_shiftpaper__subcmd__help_commands() {
+    local commands; commands=(
+'fetch-model:Download a depth model to bake with' \
+'set:Bake an image and make it the wallpaper' \
+'slideshow:Bake several images and show them in turn' \
+'transition:Show or change how one wallpaper changes into the next' \
+'mode:Show or change the cursor tracking mode' \
+'bake:Bake an image without setting it' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'shiftpaper help commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__bake_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__bake_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help bake commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__fetch-model_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__fetch-model_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help fetch-model commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__help_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help help commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__mode_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__mode_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help mode commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__set_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help set commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__slideshow_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__slideshow_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help slideshow commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__help__subcmd__transition_commands] )) ||
+_shiftpaper__subcmd__help__subcmd__transition_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper help transition commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__mode_commands] )) ||
+_shiftpaper__subcmd__mode_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper mode commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__set_commands] )) ||
+_shiftpaper__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper set commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__slideshow_commands] )) ||
+_shiftpaper__subcmd__slideshow_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper slideshow commands' commands "$@"
+}
+(( $+functions[_shiftpaper__subcmd__transition_commands] )) ||
+_shiftpaper__subcmd__transition_commands() {
+    local commands; commands=()
+    _describe -t commands 'shiftpaper transition commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_shiftpaper" ]; then
+    _shiftpaper "$@"
+else
+    compdef _shiftpaper shiftpaper
+fi

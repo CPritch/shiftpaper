@@ -28,7 +28,7 @@ ort = { version = "=2.0.0-rc.12" }
 libloading = { version = "0.9", optional = true }
 blake3 = "1"
 
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 toml_edit = "0.25"
 directories = "6"
 ureq = "3"
@@ -37,4 +37,6 @@ indicatif = "0.18"
 nix = { version = "0.31", features = ["signal"] }
 
 [dev-dependencies]
+clap_complete = "4.6.11"
+shiftpaper-config = { workspace = true, features = ["man"] }
 tempfile = "3"

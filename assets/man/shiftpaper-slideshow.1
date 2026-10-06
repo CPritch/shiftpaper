@@ -1,0 +1,41 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-slideshow 1  shiftpaper 
+.SH NAME
+shiftpaper\-slideshow \- Bake several images and show them in turn
+.SH SYNOPSIS
+\fBshiftpaper slideshow\fR [\fB\-i\fR|\fB\-\-interval\fR] [\fB\-s\fR|\fB\-\-shuffle\fR] [\fB\-\-stop\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIINPUTS\fR] 
+.SH DESCRIPTION
+Bake several images and show them in turn.
+.PP
+Bakes each image like `set` does, then lists them in config.toml\*(Aqs [slideshow]. A folder adds the images directly inside it, in name order. A running daemon starts the slideshow straight away. \-\-stop, or `set`, goes back to a single wallpaper.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-interval\fR \fI<INTERVAL>\fR [default: 10m]
+How long each image shows for, like 90s, 10m or 1h
+.TP
+\fB\-s\fR, \fB\-\-shuffle\fR
+Show the images in a random order, different each time round
+.TP
+\fB\-\-stop\fR
+Stop the slideshow, keeping the image it\*(Aqs showing
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
+The ONNX depth model to bake with. Defaults to $SHIFTPAPER_MODEL, then the one in config.toml
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fIINPUTS\fR]
+Source images (jpeg, png, or webp), or folders of them
+.SH EXAMPLES
+.nf
+shiftpaper slideshow ~/Pictures/walls             Each image for 10 minutes
+shiftpaper slideshow a.jpg b.jpg c.jpg \-i 1h      Three images, an hour each
+shiftpaper slideshow ~/Pictures/walls \-\-shuffle   In a random order
+shiftpaper slideshow \-\-stop                       Keep the current image
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

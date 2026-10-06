@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Man pages: `man shiftpaper`, one for each command (like `man shiftpaper-slideshow`), and `man shiftpaperd`. Tab completion for bash, zsh and fish too. The AUR packages install both.
+- Docs, in `docs/`: the config file, the transitions with a clip of each, depth models, and troubleshooting.
+- `shiftpaperd --help` and `--version`.
+
+### Changed
+
+- Every command's help ends with a few examples, and `shiftpaper help` lists the commands in the order you'd use them.
+- A new README header, and a shorter quick start.
+
+### Fixed
+
+- `shiftpaperd` ignored its arguments, so even `shiftpaperd --help` started the daemon.
+
 ## 0.4.0 - 2026-10-05
 
 ### Added

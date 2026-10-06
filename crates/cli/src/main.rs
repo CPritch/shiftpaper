@@ -15,56 +15,72 @@ use toml_edit::{DocumentMut, value};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Bake depth maps and configure the shiftpaperd parallax wallpaper daemon.
+/// Set parallax wallpapers for the shiftpaperd daemon.
 #[derive(Parser)]
 #[command(
     name = "shiftpaper",
     version,
-    about,
-    long_about = "shiftpaper is the command-line companion to the shiftpaperd \
-                  parallax wallpaper daemon. Use it to convert source images \
-                  into the color + 16-bit depth pairs the daemon renders, set \
-                  the active wallpaper, and switch cursor tracking modes.",
-    propagate_version = true
+    long_about = "Set parallax wallpapers for the shiftpaperd daemon.\n\n\
+                  shiftpaper bakes a depth map for each image, points the \
+                  daemon at it, and changes settings like the transition and \
+                  how the cursor is followed. Its settings are kept in \
+                  ~/.config/shiftpaper/config.toml.",
+    after_help = "\
+Examples:
+  shiftpaper fetch-model               Download the default depth model
+  shiftpaper set ~/Pictures/wall.jpg   Bake an image and make it the wallpaper
+  shiftpaper slideshow ~/Pictures      Show a folder of images in turn
+  shiftpaper transition portal         Use the portal transition
+
+Every command has its own help: shiftpaper help <command>"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
+// Listed in the order you'd usually need them, which is the order the
+// help shows them in.
 #[derive(Subcommand)]
 enum Command {
-    /// Bake a source image into a color + 16-bit depth PNG pair.
+    /// Download a depth model to bake with.
     ///
-    /// Runs Depth Anything inference on the source image and writes a
-    /// pair of files (`<hash>.color.png` and `<hash>.depth16.png`) to
-    /// the cache directory or the directory specified by --out. Baking
-    /// the same image again reuses the existing pair.
-    Bake {
-        /// Source image (jpeg, png, or webp).
-        input: PathBuf,
-        /// Output directory. Defaults to the shiftpaper cache directory
-        /// at $XDG_CACHE_HOME/shiftpaper/wallpapers.
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
-        #[arg(short, long, env = "SHIFTPAPER_MODEL")]
-        model: Option<PathBuf>,
+    /// Downloads it from HuggingFace into ~/.local/share/shiftpaper/models/
+    /// and makes it the one `set`, `slideshow` and `bake` use. Without a
+    /// name, it gets the default. A model that's already there isn't
+    /// downloaded again unless you add --force. Each model has its own
+    /// licence, shown before it downloads.
+    #[command(after_help = "\
+Examples:
+  shiftpaper fetch-model               Download the default model
+  shiftpaper fetch-model --list        List the models and their sizes
+  shiftpaper fetch-model moge-2-vits   Download a smaller, faster model")]
+    FetchModel {
+        /// Which model to download. See --list.
+        name: Option<String>,
+        /// List the models that can be downloaded.
+        #[arg(long, conflicts_with = "name")]
+        list: bool,
+        /// Re-download even if the files already exist.
+        #[arg(long, short)]
+        force: bool,
     },
 
-    /// Bake an image and set it as the active wallpaper.
+    /// Bake an image and make it the wallpaper.
     ///
-    /// Performs the same baking as `bake`, then points the daemon's
-    /// config.toml at it, replacing any slideshow, and a running daemon
-    /// changes to it. The resolved model path is also persisted to
-    /// [inference] so future invocations don't need --model.
+    /// Bakes the image like `bake` does, then makes it the wallpaper in
+    /// config.toml, replacing any slideshow. A running daemon changes to it
+    /// straight away.
+    #[command(after_help = "\
+Examples:
+  shiftpaper set ~/Pictures/forest.jpg
+  shiftpaper set forest.jpg --model ~/models/other.onnx")]
     Set {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
-        /// When provided, the resolved path is persisted to config.
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml. Whichever is
+        /// used is saved for next time.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
         model: Option<PathBuf>,
     },
@@ -75,6 +91,12 @@ enum Command {
     /// [slideshow]. A folder adds the images directly inside it, in name
     /// order. A running daemon starts the slideshow straight away. --stop,
     /// or `set`, goes back to a single wallpaper.
+    #[command(after_help = "\
+Examples:
+  shiftpaper slideshow ~/Pictures/walls             Each image for 10 minutes
+  shiftpaper slideshow a.jpg b.jpg c.jpg -i 1h      Three images, an hour each
+  shiftpaper slideshow ~/Pictures/walls --shuffle   In a random order
+  shiftpaper slideshow --stop                       Keep the current image")]
     Slideshow {
         /// Source images (jpeg, png, or webp), or folders of them.
         #[arg(required_unless_present = "stop")]
@@ -88,30 +110,10 @@ enum Command {
         /// Stop the slideshow, keeping the image it's showing.
         #[arg(long, conflicts_with_all = ["inputs", "interval", "shuffle"])]
         stop: bool,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
         model: Option<PathBuf>,
-    },
-
-    /// Download a depth model from HuggingFace and make it the one `set`
-    /// and `bake` use.
-    ///
-    /// Without a name, downloads the default model. Files go to
-    /// ~/.local/share/shiftpaper/models/<name>/ and the path is written to
-    /// [inference] model_path in config.toml. Safe to re-run: the download
-    /// is skipped if the files already exist, unless --force is given.
-    /// Each model's weights have their own licence, shown before
-    /// downloading.
-    FetchModel {
-        /// Which model to download. See --list.
-        name: Option<String>,
-        /// List the models that can be downloaded.
-        #[arg(long, conflicts_with = "name")]
-        list: bool,
-        /// Re-download even if the files already exist.
-        #[arg(long, short)]
-        force: bool,
     },
 
     /// Show or change how one wallpaper changes into the next.
@@ -119,6 +121,12 @@ enum Command {
     /// Applies to every change of wallpaper, from `set` or a slideshow,
     /// and a running daemon picks it up straight away. With no arguments,
     /// prints the current transition and how long it takes.
+    #[command(after_help = "\
+Examples:
+  shiftpaper transition                Print the current transition
+  shiftpaper transition portal         Use portal
+  shiftpaper transition tide-in -s 5   Use tide-in, taking 5 seconds
+  shiftpaper transition --secs 1.5     Keep the transition, change its length")]
     Transition {
         /// The transition to use.
         #[arg(value_enum)]
@@ -130,20 +138,49 @@ enum Command {
 
     /// Show or change the cursor tracking mode.
     ///
-    /// Pointer mode (the default) uses Wayland's native pointer events.
-    /// It works on any wlr-layer-shell compositor, and the daemon only
-    /// draws while the cursor is over visible desktop, which saves
-    /// battery.
+    /// Pointer mode, the default, uses Wayland's own pointer events. It
+    /// works on any wlr-layer-shell compositor, and the wallpaper only
+    /// moves while the cursor is over the desktop, which saves battery.
     ///
-    /// Hyprland mode reads the global cursor position from the Hyprland
-    /// IPC socket. Parallax remains responsive even when windows cover
-    /// the desktop, at the cost of being Hyprland-specific. Note that
-    /// Hyprland mode lets the daemon observe cursor positions over
-    /// arbitrary windows, which is a minor privacy consideration.
+    /// Hyprland mode asks Hyprland where the cursor is, so the wallpaper
+    /// keeps moving when windows cover it. It only works on Hyprland, and
+    /// it lets the daemon see where your cursor is over other apps.
+    ///
+    /// Restart the daemon after switching.
+    #[command(after_help = "\
+Examples:
+  shiftpaper mode            Print the current mode
+  shiftpaper mode hyprland   Follow the cursor over windows too (Hyprland only)
+  shiftpaper mode pointer    Go back to the default")]
     Mode {
-        /// Tracking mode to set. Omit to print the current value.
+        /// The mode to switch to. Leave it out to print the current one.
         #[arg(value_enum)]
         mode: Option<TrackingMode>,
+    },
+
+    /// Bake an image without setting it.
+    ///
+    /// Runs the depth model on the image and writes a colour PNG and a
+    /// 16-bit depth PNG, `<hash>.color.png` and `<hash>.depth16.png`, to
+    /// the cache or to --out, then prints their paths. Baking the same
+    /// image again reuses them. `set` and `slideshow` bake for you, so you
+    /// only need this for an image you'll put in config.toml yourself, like
+    /// one for a single monitor.
+    #[command(after_help = "\
+Examples:
+  shiftpaper bake photo.jpg                 Bake into the cache
+  shiftpaper bake photo.jpg --out ~/walls   Bake into a folder of your own")]
+    Bake {
+        /// Source image (jpeg, png, or webp).
+        input: PathBuf,
+        /// Where to write the files. Defaults to the cache,
+        /// ~/.cache/shiftpaper/wallpapers.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml.
+        #[arg(short, long, env = "SHIFTPAPER_MODEL")]
+        model: Option<PathBuf>,
     },
 }
 
@@ -493,6 +530,66 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_examples_parse() {
+        let cli = Cli::command();
+        let mut checked = 0;
+        for command in std::iter::once(&cli).chain(cli.get_subcommands()) {
+            let Some(help) = command.get_after_help() else {
+                continue;
+            };
+            for line in help.to_string().lines() {
+                let Some(example) = line.strip_prefix("  shiftpaper ") else {
+                    continue;
+                };
+                // Any description is after a gap of three or more spaces.
+                let args: Vec<&str> = example
+                    .split("   ")
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .collect();
+                assert!(parse(&args).is_ok(), "{line}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn generated_files_are_current() {
+        use clap_complete::Shell;
+        use shiftpaper_config::man;
+
+        let mut cli = Cli::command().disable_help_subcommand(true);
+        cli.build();
+        let mut files = vec![(
+            "man/shiftpaper.1".to_string(),
+            man::page(&cli, &["shiftpaperd(1)"]),
+        )];
+        for command in cli.get_subcommands() {
+            // Building named each subcommand like shiftpaper-set.
+            let name = command.get_display_name().unwrap();
+            files.push((
+                format!("man/{name}.1"),
+                man::page(command, &["shiftpaper(1)"]),
+            ));
+        }
+        for (shell, name) in [
+            (Shell::Bash, "shiftpaper.bash"),
+            (Shell::Zsh, "_shiftpaper"),
+            (Shell::Fish, "shiftpaper.fish"),
+        ] {
+            let mut out = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "shiftpaper", &mut out);
+            files.push((
+                format!("completions/{name}"),
+                String::from_utf8(out).unwrap(),
+            ));
+        }
+        man::check(&files);
     }
 
     #[test]

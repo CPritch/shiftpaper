@@ -1,0 +1,42 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-mode 1  shiftpaper 
+.SH NAME
+shiftpaper\-mode \- Show or change the cursor tracking mode
+.SH SYNOPSIS
+\fBshiftpaper mode\fR [\fB\-h\fR|\fB\-\-help\fR] [\fIMODE\fR] 
+.SH DESCRIPTION
+Show or change the cursor tracking mode.
+.PP
+Pointer mode, the default, uses Wayland\*(Aqs own pointer events. It works on any wlr\-layer\-shell compositor, and the wallpaper only moves while the cursor is over the desktop, which saves battery.
+.PP
+Hyprland mode asks Hyprland where the cursor is, so the wallpaper keeps moving when windows cover it. It only works on Hyprland, and it lets the daemon see where your cursor is over other apps.
+.PP
+Restart the daemon after switching.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+[\fIMODE\fR]
+The mode to switch to. Leave it out to print the current one
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+pointer: The default. Works on any compositor, and moves only while the cursor is over the desktop
+.IP \(bu 2
+hyprland: Follows the cursor over windows too. Hyprland only
+.RE
+.SH EXAMPLES
+.nf
+shiftpaper mode            Print the current mode
+shiftpaper mode hyprland   Follow the cursor over windows too (Hyprland only)
+shiftpaper mode pointer    Go back to the default
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

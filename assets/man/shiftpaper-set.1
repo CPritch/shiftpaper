@@ -1,0 +1,30 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaper-set 1  shiftpaper 
+.SH NAME
+shiftpaper\-set \- Bake an image and make it the wallpaper
+.SH SYNOPSIS
+\fBshiftpaper set\fR [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
+.SH DESCRIPTION
+Bake an image and make it the wallpaper.
+.PP
+Bakes the image like `bake` does, then makes it the wallpaper in config.toml, replacing any slideshow. A running daemon changes to it straight away.
+.SH OPTIONS
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
+The ONNX depth model to bake with. Defaults to $SHIFTPAPER_MODEL, then the one in config.toml. Whichever is used is saved for next time
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIINPUT\fR>
+Source image (jpeg, png, or webp)
+.SH EXAMPLES
+.nf
+shiftpaper set ~/Pictures/forest.jpg
+shiftpaper set forest.jpg \-\-model ~/models/other.onnx
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

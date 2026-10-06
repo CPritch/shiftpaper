@@ -1,0 +1,30 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH shiftpaperd 1  shiftpaper 
+.SH NAME
+shiftpaperd \- The shiftpaper parallax wallpaper daemon
+.SH SYNOPSIS
+\fBshiftpaperd\fR [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+.SH DESCRIPTION
+The shiftpaper parallax wallpaper daemon.
+.PP
+shiftpaperd draws the wallpaper chosen with `shiftpaper set` or `shiftpaper slideshow` on every screen, and shifts it as the cursor moves. It runs in the foreground and is usually started by systemd:
+.PP
+  systemctl \-\-user enable \-\-now shiftpaperd
+.SH FILES
+.nf
+~/.config/shiftpaper/config.toml   Settings, written by shiftpaper
+.fi
+.SH SIGNALS
+.nf
+SIGHUP           Reload config.toml. shiftpaper sends this after a change.
+SIGTERM, SIGINT  Exit.
+.fi
+.SH ENVIRONMENT
+.nf
+RUST_LOG   What to log to stderr. shiftpaperd=debug shows more.
+.fi
+.SH "SEE ALSO"
+shiftpaper(1)
+.PP
+The docs: https://github.com/CPritch/shiftpaper/tree/main/docs

@@ -8,6 +8,8 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "man")]
+pub mod man;
 mod shuffle;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -43,13 +45,11 @@ pub struct DaemonConfig {
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum TrackingMode {
-    /// Wayland-native pointer events. Default. Works on any
-    /// wlr-layer-shell compositor; renders only when the cursor is
-    /// over visible desktop.
+    /// The default. Works on any compositor, and moves only while the
+    /// cursor is over the desktop.
     #[default]
     Pointer,
-    /// Hyprland IPC global cursor polling. Hyprland-only; sees the
-    /// cursor even when windows cover the desktop.
+    /// Follows the cursor over windows too. Hyprland only.
     Hyprland,
 }
 

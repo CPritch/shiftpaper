@@ -9,6 +9,7 @@ mod wayland;
 
 use anyhow::{Context, Result};
 use calloop::timer::{TimeoutAction, Timer};
+use clap::Parser;
 use shiftpaper_config::TrackingMode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -31,7 +32,35 @@ extern "C" fn handle_reload(_: std::ffi::c_int) {
     RELOAD.store(true, Ordering::Relaxed);
 }
 
+// There are no arguments, as everything the daemon does comes from
+// config.toml, but without this --help would start it.
+/// The shiftpaper parallax wallpaper daemon.
+#[derive(Parser)]
+#[command(
+    name = "shiftpaperd",
+    version,
+    long_about = "The shiftpaper parallax wallpaper daemon.\n\n\
+                  shiftpaperd draws the wallpaper chosen with `shiftpaper set` \
+                  or `shiftpaper slideshow` on every screen, and shifts it as \
+                  the cursor moves. It runs in the foreground and is usually \
+                  started by systemd:\n\n  \
+                  systemctl --user enable --now shiftpaperd",
+    after_help = "\
+Files:
+  ~/.config/shiftpaper/config.toml   Settings, written by shiftpaper
+
+Signals:
+  SIGHUP           Reload config.toml. shiftpaper sends this after a change.
+  SIGTERM, SIGINT  Exit.
+
+Environment:
+  RUST_LOG   What to log to stderr. shiftpaperd=debug shows more."
+)]
+struct Args {}
+
 fn main() -> Result<()> {
+    Args::parse();
+
     // Log targets are named after the crate, which is the binary's name.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -192,5 +221,30 @@ fn install_signal_handlers() {
         if let Err(e) = sigaction(Signal::SIGHUP, &reload) {
             warn!("failed to install SIGHUP handler: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn generated_files_are_current() {
+        use shiftpaper_config::man;
+
+        let page = man::page(&Args::command(), &["shiftpaper(1)"]);
+        man::check(&[("man/shiftpaperd.1".to_string(), page)]);
+    }
+
+    #[test]
+    fn args_definition_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected() {
+        assert!(Args::try_parse_from(["shiftpaperd", "--foreground"]).is_err());
+        assert!(Args::try_parse_from(["shiftpaperd"]).is_ok());
     }
 }
