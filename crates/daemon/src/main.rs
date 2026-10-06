@@ -54,7 +54,7 @@ Signals:
   SIGTERM, SIGINT  Exit.
 
 Environment:
-  RUST_LOG   How much to log, to stderr. shiftpaperd=debug shows more."
+  RUST_LOG   What to log to stderr. shiftpaperd=debug shows more."
 )]
 struct Args {}
 

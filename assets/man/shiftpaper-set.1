@@ -2,17 +2,17 @@
 .el .ds Aq '
 .TH shiftpaper-set 1  shiftpaper 
 .SH NAME
-shiftpaper\-set \- Bake an image and set it as the active wallpaper
+shiftpaper\-set \- Bake an image and make it the wallpaper
 .SH SYNOPSIS
 \fBshiftpaper set\fR [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
 .SH DESCRIPTION
-Bake an image and set it as the active wallpaper.
+Bake an image and make it the wallpaper.
 .PP
-Performs the same baking as `bake`, then points the daemon\*(Aqs config.toml at it, replacing any slideshow, and a running daemon changes to it. The resolved model path is also persisted to [inference] so future invocations don\*(Aqt need \-\-model.
+Bakes the image like `bake` does, then makes it the wallpaper in config.toml, replacing any slideshow. A running daemon changes to it straight away.
 .SH OPTIONS
 .TP
 \fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
-Path to the ONNX depth model. Falls back to $SHIFTPAPER_MODEL, then [inference] model_path in config.toml. When provided, the resolved path is persisted to config
+The ONNX depth model to bake with. Defaults to $SHIFTPAPER_MODEL, then the one in config.toml. Whichever is used is saved for next time
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

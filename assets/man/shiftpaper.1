@@ -8,7 +8,7 @@ shiftpaper \- Set parallax wallpapers for the shiftpaperd daemon
 .SH DESCRIPTION
 Set parallax wallpapers for the shiftpaperd daemon.
 .PP
-shiftpaper bakes a depth map for each image, points the daemon at it, and changes settings like the transition and how the cursor is followed. The config it writes lives at ~/.config/shiftpaper/config.toml.
+shiftpaper bakes a depth map for each image, points the daemon at it, and changes settings like the transition and how the cursor is followed. Its settings are kept in ~/.config/shiftpaper/config.toml.
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
@@ -22,7 +22,7 @@ shiftpaper\-fetch\-model(1)
 Download a depth model to bake with
 .TP
 shiftpaper\-set(1)
-Bake an image and set it as the active wallpaper
+Bake an image and make it the wallpaper
 .TP
 shiftpaper\-slideshow(1)
 Bake several images and show them in turn
@@ -34,13 +34,13 @@ shiftpaper\-mode(1)
 Show or change the cursor tracking mode
 .TP
 shiftpaper\-bake(1)
-Bake a source image into a color + 16\-bit depth PNG pair
+Bake an image without setting it
 .SH EXAMPLES
 .nf
 shiftpaper fetch\-model               Download the default depth model
 shiftpaper set ~/Pictures/wall.jpg   Bake an image and make it the wallpaper
 shiftpaper slideshow ~/Pictures      Show a folder of images in turn
-shiftpaper transition portal         Change how wallpapers change
+shiftpaper transition portal         Use the portal transition
 .fi
 .SH "SEE ALSO"
 shiftpaperd(1)

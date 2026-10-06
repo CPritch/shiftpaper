@@ -8,7 +8,7 @@ shiftpaper\-fetch\-model \- Download a depth model to bake with
 .SH DESCRIPTION
 Download a depth model to bake with.
 .PP
-Downloads from HuggingFace and makes it the model `set`, `slideshow` and `bake` use. Without a name, downloads the default model. Files go to ~/.local/share/shiftpaper/models/<name>/ and the path is written to [inference] model_path in config.toml. Safe to re\-run: the download is skipped if the files already exist, unless \-\-force is given. Each model\*(Aqs weights have their own licence, shown before downloading.
+Downloads it from HuggingFace into ~/.local/share/shiftpaper/models/ and makes it the one `set`, `slideshow` and `bake` use. Without a name, it gets the default. A model that\*(Aqs already there isn\*(Aqt downloaded again unless you add \-\-force. Each model has its own licence, shown before it downloads.
 .SH OPTIONS
 .TP
 \fB\-\-list\fR

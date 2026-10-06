@@ -2,20 +2,20 @@
 .el .ds Aq '
 .TH shiftpaper-bake 1  shiftpaper 
 .SH NAME
-shiftpaper\-bake \- Bake a source image into a color + 16\-bit depth PNG pair
+shiftpaper\-bake \- Bake an image without setting it
 .SH SYNOPSIS
 \fBshiftpaper bake\fR [\fB\-o\fR|\fB\-\-out\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
 .SH DESCRIPTION
-Bake a source image into a color + 16\-bit depth PNG pair.
+Bake an image without setting it.
 .PP
-Runs the depth model on the source image and writes a pair of files (`<hash>.color.png` and `<hash>.depth16.png`) to the cache directory or the directory specified by \-\-out, printing their paths. Baking the same image again reuses the existing pair. `set` and `slideshow` bake for you, so this is only needed to bake without changing the wallpaper.
+Runs the depth model on the image and writes a colour PNG and a 16\-bit depth PNG, `<hash>.color.png` and `<hash>.depth16.png`, to the cache or to \-\-out, then prints their paths. Baking the same image again reuses them. `set` and `slideshow` bake for you, so you only need this for an image you\*(Aqll put in config.toml yourself, like one for a single monitor.
 .SH OPTIONS
 .TP
 \fB\-o\fR, \fB\-\-out\fR \fI<OUT>\fR
-Output directory. Defaults to the shiftpaper cache directory at $XDG_CACHE_HOME/shiftpaper/wallpapers
+Where to write the files. Defaults to the cache, ~/.cache/shiftpaper/wallpapers
 .TP
 \fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
-Path to the ONNX depth model. Falls back to $SHIFTPAPER_MODEL, then [inference] model_path in config.toml
+The ONNX depth model to bake with. Defaults to $SHIFTPAPER_MODEL, then the one in config.toml
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

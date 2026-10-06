@@ -23,14 +23,14 @@ use tracing_subscriber::EnvFilter;
     long_about = "Set parallax wallpapers for the shiftpaperd daemon.\n\n\
                   shiftpaper bakes a depth map for each image, points the \
                   daemon at it, and changes settings like the transition and \
-                  how the cursor is followed. The config it writes lives at \
+                  how the cursor is followed. Its settings are kept in \
                   ~/.config/shiftpaper/config.toml.",
     after_help = "\
 Examples:
   shiftpaper fetch-model               Download the default depth model
   shiftpaper set ~/Pictures/wall.jpg   Bake an image and make it the wallpaper
   shiftpaper slideshow ~/Pictures      Show a folder of images in turn
-  shiftpaper transition portal         Change how wallpapers change
+  shiftpaper transition portal         Use the portal transition
 
 Every command has its own help: shiftpaper help <command>"
 )]
@@ -45,14 +45,11 @@ struct Cli {
 enum Command {
     /// Download a depth model to bake with.
     ///
-    /// Downloads from HuggingFace and makes it the model `set`,
-    /// `slideshow` and `bake` use. Without a name, downloads the default
-    /// model. Files go to
-    /// ~/.local/share/shiftpaper/models/<name>/ and the path is written to
-    /// [inference] model_path in config.toml. Safe to re-run: the download
-    /// is skipped if the files already exist, unless --force is given.
-    /// Each model's weights have their own licence, shown before
-    /// downloading.
+    /// Downloads it from HuggingFace into ~/.local/share/shiftpaper/models/
+    /// and makes it the one `set`, `slideshow` and `bake` use. Without a
+    /// name, it gets the default. A model that's already there isn't
+    /// downloaded again unless you add --force. Each model has its own
+    /// licence, shown before it downloads.
     #[command(after_help = "\
 Examples:
   shiftpaper fetch-model               Download the default model
@@ -69,12 +66,11 @@ Examples:
         force: bool,
     },
 
-    /// Bake an image and set it as the active wallpaper.
+    /// Bake an image and make it the wallpaper.
     ///
-    /// Performs the same baking as `bake`, then points the daemon's
-    /// config.toml at it, replacing any slideshow, and a running daemon
-    /// changes to it. The resolved model path is also persisted to
-    /// [inference] so future invocations don't need --model.
+    /// Bakes the image like `bake` does, then makes it the wallpaper in
+    /// config.toml, replacing any slideshow. A running daemon changes to it
+    /// straight away.
     #[command(after_help = "\
 Examples:
   shiftpaper set ~/Pictures/forest.jpg
@@ -82,9 +78,9 @@ Examples:
     Set {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
-        /// When provided, the resolved path is persisted to config.
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml. Whichever is
+        /// used is saved for next time.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
         model: Option<PathBuf>,
     },
@@ -114,8 +110,8 @@ Examples:
         /// Stop the slideshow, keeping the image it's showing.
         #[arg(long, conflicts_with_all = ["inputs", "interval", "shuffle"])]
         stop: bool,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
         model: Option<PathBuf>,
     },
@@ -142,35 +138,34 @@ Examples:
 
     /// Show or change the cursor tracking mode.
     ///
-    /// Pointer mode (the default) uses Wayland's native pointer events.
-    /// It works on any wlr-layer-shell compositor, and the daemon only
-    /// draws while the cursor is over visible desktop, which saves
-    /// battery.
+    /// Pointer mode, the default, uses Wayland's own pointer events. It
+    /// works on any wlr-layer-shell compositor, and the wallpaper only
+    /// moves while the cursor is over the desktop, which saves battery.
     ///
-    /// Hyprland mode reads the global cursor position from the Hyprland
-    /// IPC socket. Parallax remains responsive even when windows cover
-    /// the desktop, at the cost of being Hyprland-specific. Note that
-    /// Hyprland mode lets the daemon observe cursor positions over
-    /// arbitrary windows, which is a minor privacy consideration.
+    /// Hyprland mode asks Hyprland where the cursor is, so the wallpaper
+    /// keeps moving when windows cover it. It only works on Hyprland, and
+    /// it lets the daemon see where your cursor is over other apps.
+    ///
+    /// Restart the daemon after switching.
     #[command(after_help = "\
 Examples:
   shiftpaper mode            Print the current mode
   shiftpaper mode hyprland   Follow the cursor over windows too (Hyprland only)
   shiftpaper mode pointer    Go back to the default")]
     Mode {
-        /// Tracking mode to set. Omit to print the current value.
+        /// The mode to switch to. Leave it out to print the current one.
         #[arg(value_enum)]
         mode: Option<TrackingMode>,
     },
 
-    /// Bake a source image into a color + 16-bit depth PNG pair.
+    /// Bake an image without setting it.
     ///
-    /// Runs the depth model on the source image and writes a pair of
-    /// files (`<hash>.color.png` and `<hash>.depth16.png`) to the cache
-    /// directory or the directory specified by --out, printing their
-    /// paths. Baking the same image again reuses the existing pair. `set`
-    /// and `slideshow` bake for you, so this is only needed to bake
-    /// without changing the wallpaper.
+    /// Runs the depth model on the image and writes a colour PNG and a
+    /// 16-bit depth PNG, `<hash>.color.png` and `<hash>.depth16.png`, to
+    /// the cache or to --out, then prints their paths. Baking the same
+    /// image again reuses them. `set` and `slideshow` bake for you, so you
+    /// only need this for an image you'll put in config.toml yourself, like
+    /// one for a single monitor.
     #[command(after_help = "\
 Examples:
   shiftpaper bake photo.jpg                 Bake into the cache
@@ -178,12 +173,12 @@ Examples:
     Bake {
         /// Source image (jpeg, png, or webp).
         input: PathBuf,
-        /// Output directory. Defaults to the shiftpaper cache directory
-        /// at $XDG_CACHE_HOME/shiftpaper/wallpapers.
+        /// Where to write the files. Defaults to the cache,
+        /// ~/.cache/shiftpaper/wallpapers.
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Path to the ONNX depth model. Falls back to
-        /// $SHIFTPAPER_MODEL, then [inference] model_path in config.toml.
+        /// The ONNX depth model to bake with. Defaults to
+        /// $SHIFTPAPER_MODEL, then the one in config.toml.
         #[arg(short, long, env = "SHIFTPAPER_MODEL")]
         model: Option<PathBuf>,
     },
