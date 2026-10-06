@@ -3,3 +3,4 @@
 assets/reel.avif export-ignore
 .github export-ignore
 packaging export-ignore
+docs/media export-ignore

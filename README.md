@@ -51,32 +51,29 @@ cargo install --path crates/cli
 cargo install --path crates/daemon
 ```
 
+To run it with systemd, copy `shiftpaperd.service` into `~/.config/systemd/user/` and change its `ExecStart` to `%h/.cargo/bin/shiftpaperd`.
+
 ## Quick start
 
+Every command has its own help, so `shiftpaper help` is a good place to look around.
+
 ```
-shiftpaper fetch-model                      # downloads the depth model (~420 MB)
-shiftpaper set ~/Pictures/wallpaper.jpg
-systemctl --user enable --now shiftpaperd
+shiftpaper fetch-model                      # download the depth model (~420 MB)
+shiftpaper set ~/Pictures/wallpaper.jpg     # make an image your wallpaper
+systemctl --user enable --now shiftpaperd   # start the daemon
 ```
 
-To change wallpaper, `shiftpaper set` another image. The new one morphs in through the depth of the scene.
+Then try:
 
-For a slideshow, run `shiftpaper slideshow ~/Pictures/walls --interval 10m`. Add `--shuffle` to mix up the order, and `shiftpaper slideshow --stop` keeps whichever image is showing.
-
-`shiftpaper fetch-model --list` shows the other depth models. Their licences are in [THIRD_PARTY.md](THIRD_PARTY.md).
-
-From a source install, run `shiftpaperd` directly, or copy `shiftpaperd.service` into `~/.config/systemd/user/` and point its `ExecStart` at your binary.
-
-## Tracking modes
-
-- `pointer` (default): works on any wlr-layer-shell compositor. The wallpaper only moves while the cursor is over the desktop.
-- `hyprland`: follows the cursor everywhere, even over windows. Hyprland only, and it lets the daemon see the cursor over other apps.
-
-Switch with `shiftpaper mode hyprland`, then restart the daemon.
+```
+shiftpaper set ~/Pictures/another.jpg       # change it
+shiftpaper slideshow ~/Pictures/walls       # show a folder of images in turn
+shiftpaper transition portal                # try a different transition
+```
 
 ## Docs
 
-Proper docs are still to come. Until then, `shiftpaper --help` covers the CLI, and the config lives at `~/.config/shiftpaper/config.toml`.
+The [docs](docs/) cover the config file, the transitions, depth models and troubleshooting.
 
 ## Compositors
 
