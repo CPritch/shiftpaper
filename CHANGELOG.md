@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `portal` grows like a sphere from the surface under the cursor, so it spreads over that first and wraps round things nearer and further away.
+- `dissolve` grows spheres from random places in the scene, like `portal` does from the cursor, further things tending to go first.
+- `tide-in` and `tide-out` find the ground in the scene, so the water rises level with it in views from above or at an angle, instead of always from the bottom of the picture. Close-ups and scenes without clear ground work as before.
+
 ## 0.4.2 - 2026-10-06
 
 ### Fixed

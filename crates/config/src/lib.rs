@@ -79,11 +79,11 @@ pub enum Transition {
     /// Everything changes together, the shape of the scene a little ahead
     /// of its colours.
     Morph,
-    /// Patches of the new wallpaper appear at random, nearer things
-    /// tending to go first.
+    /// The new wallpaper grows like spheres in the scene from random
+    /// places, further things tending to go first.
     Dissolve,
-    /// The new wallpaper grows out from the cursor like a bubble in the
-    /// scene, following it if it moves.
+    /// The new wallpaper grows out from the cursor like a sphere in the
+    /// scene, and follows the cursor if it moves.
     Portal,
     /// The new wallpaper rises through the old like a tide coming in,
     /// lowest places first.

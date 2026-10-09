@@ -43,13 +43,23 @@ struct Uniforms {
     style: u32,
     // The screen's width over its height.
     aspect: f32,
-    // Where the cursor has been in a portal transition: screen uv, then the
-    // progress when it was there. The first `trail_len` are in use.
+    // Where the spheres of a portal or dissolve grow from: screen uv, then
+    // the progress when each starts. The first `trail_len` are in use.
     trail_len: u32,
-    // How fast each of the portal's bubbles grows, in screen heights over
-    // the whole transition.
-    portal_speed: f32,
+    // How far a sphere grows, in the units of `scene_point`. See `Trail`
+    // in renderer.rs.
+    portal_reach: f32,
     trail: array<vec4<f32>, TRAIL_POINTS>,
+    // How the portal's spheres are paced, PACE_POINTS of them four to
+    // a vec4. See `pace`.
+    portal_pace: array<vec4<f32>, 9>,
+    // When a pixel switches, from when the first sphere reaches it, packed
+    // the same way. See `timing`.
+    portal_timing: array<vec4<f32>, 9>,
+    // Where the ground is in each wallpaper, for the tide. See
+    // `tide_height`.
+    ground: vec4<f32>,
+    next_ground: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
@@ -68,12 +78,16 @@ const TIDE_OUT: u32 = 6u;
 
 // The portal's settings, explained in renderer.rs. Must match it.
 const TRAIL_POINTS: u32 = 32u;
-const PORTAL_DEPTH: f32 = 1.0;
-const PORTAL_EDGE: f32 = 0.04;
+const PORTAL_NEAR: f32 = 0.1;
+const PACE_POINTS: u32 = 33u;
+// How soft the portal's edge is, as a fraction of the transition.
+const PORTAL_EDGE: f32 = 0.015;
+// How far noise pushes the portal's edge in and out, in the units of
+// `scene_point`, and how many bumps it has to a unit.
+const PORTAL_NOISE: f32 = 0.12;
+const PORTAL_NOISE_SCALE: f32 = 6.0;
 
-// Where the tide takes the horizon to be, down the image, and how close a
-// depth of 0 is. Must match depth.rs.
-const HORIZON: f32 = 0.5;
+// How close a depth of 0 is for the tide. Must match depth.rs.
 const TIDE_NEAR: f32 = 0.1;
 // Just under the tide's surface the water ripples and darkens a little.
 // How far down that goes, in height rank, how far the ripple moves the
@@ -155,18 +169,11 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(below, above, s.y);
 }
 
-// Soft blobs, about six to the screen's height, with finer detail at
-// their edges.
-fn blobs(screen_uv: vec2<f32>) -> f32 {
-    let p = vec2<f32>(screen_uv.x * u.aspect, screen_uv.y) * 6.0;
-    return 0.7 * value_noise(p) + 0.3 * value_noise(p * 3.1 + 17.0);
-}
-
-// Roughly how high a point is in the scene, squashed into (-1, 1). Must
-// match tide_height in depth.rs, which explains it.
-fn tide_height(image_y: f32, depth: f32) -> f32 {
+// Roughly how high a point is in the scene above `ground`, squashed into
+// (-1, 1). Must match tide_height in depth.rs, which explains it.
+fn tide_height(uv: vec2<f32>, depth: f32, ground: vec4<f32>) -> f32 {
     let distance = 1.0 / (depth + TIDE_NEAR);
-    let height = (HORIZON - image_y) * distance;
+    let height = distance * dot(ground.xyz, vec3<f32>(uv, 1.0)) + ground.w;
     return height / (1.0 + abs(height));
 }
 
@@ -189,9 +196,9 @@ fn height_rank(table: texture_1d<f32>, height: f32) -> f32 {
 fn under_water(uv: vec2<f32>, depth: f32, next_uv: vec2<f32>, next_depth: f32, t: f32) -> f32 {
     let level = t * (1.0 + 2.0 * BAND) - BAND;
     if u.style == TIDE_IN {
-        return level - height_rank(ranks, tide_height(uv.y, depth));
+        return level - height_rank(ranks, tide_height(uv, depth, u.ground));
     }
-    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv.y, next_depth));
+    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv, next_depth, u.next_ground));
 }
 
 // Small waves across the tide's surface, which move as it does.
@@ -200,27 +207,79 @@ fn wave(screen_uv: vec2<f32>, t: f32) -> f32 {
         + 0.5 * sin(screen_uv.x * 210.0 - t * 70.0 + screen_uv.y * 40.0);
 }
 
-// How far a pixel has switched in a portal. The new wallpaper grows like
-// a bubble in the scene from each point on the cursor's trail, so it
-// spreads across the surface under the cursor first and has to wrap round
-// things nearer or further away.
-fn portal_weight(screen_uv: vec2<f32>, rank: f32, t: f32) -> f32 {
-    var weight = 0.0;
-    for (var i = 0u; i < u.trail_len && weight < 1.0; i += 1u) {
+// Where a pixel is in the scene: across the screen in screen heights, then
+// the log of its distance, from depth as in `tide_height`. Near any one
+// point this is the scene shrunk by that point's distance, so a sphere in
+// it looks like a sphere in the scene, but far things aren't spread out
+// any more than near ones. Trail::new in renderer.rs relies on how far
+// apart this puts any two pixels.
+fn scene_point(screen_uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    return vec3<f32>((screen_uv - 0.5) * vec2<f32>(u.aspect, 1.0), -log(depth + PORTAL_NEAR));
+}
+
+// How far through its growth a portal sphere is once it has grown to
+// `distance`, from `Trail::pace` in renderer.rs.
+fn pace(distance: f32) -> f32 {
+    let x = clamp(distance / u.portal_reach, 0.0, 1.0) * f32(PACE_POINTS - 1u);
+    let i = min(u32(x), PACE_POINTS - 2u);
+    let j = i + 1u;
+    return mix(u.portal_pace[i / 4u][i % 4u], u.portal_pace[j / 4u][j % 4u], x - f32(i));
+}
+
+// When a pixel switches, as transition progress, once the first sphere
+// reaches it at `arrival`, from `Trail::timing` in renderer.rs.
+fn timing(arrival: f32) -> f32 {
+    let x = clamp(arrival, 0.0, 1.0) * f32(PACE_POINTS - 1u);
+    let i = min(u32(x), PACE_POINTS - 2u);
+    let j = i + 1u;
+    return mix(u.portal_timing[i / 4u][i % 4u], u.portal_timing[j / 4u][j % 4u], x - f32(i));
+}
+
+// Smooth noise in the scene, from 0 to 1, made of two layers of
+// value_noise blended through depth.
+fn scene_noise(p: vec3<f32>) -> f32 {
+    let q = p * PORTAL_NOISE_SCALE + 64.0;
+    let layer = floor(q.z);
+    let s = fract(q.z);
+    let below = value_noise(q.xy + layer * 17.0);
+    let above = value_noise(q.xy + (layer + 1.0) * 17.0);
+    return mix(below, above, s * s * (3.0 - 2.0 * s));
+}
+
+// The new wallpaper grows like a sphere in the scene from each point on
+// the trail, starting at the surface under it: the cursor's trail for the
+// portal, and random points for the dissolve. It spreads over that
+// surface first and reaches things nearer or further away later, so its
+// front wraps round the shape of the scene. Noise pushes its edge in and
+// out, across the screen and in depth. Returns when this pixel switches,
+// as transition progress, from when the first sphere reaches it.
+fn portal_arrival(screen_uv: vec2<f32>, depth: f32) -> f32 {
+    let here = scene_point(screen_uv, depth);
+    let bump = (scene_noise(here) - 0.5) * PORTAL_NOISE;
+    // Each sphere grows over this much of the transition, so the first
+    // has reached everywhere by the end, at the latest.
+    let growth = 1.0 - 2.0 * PORTAL_EDGE;
+    var first = 2.0;
+    for (var i = 0u; i < u.trail_len; i += 1u) {
         let point = u.trail[i];
-        let radius = (t - point.z) * u.portal_speed - PORTAL_EDGE;
-        let across = (screen_uv - point.xy) * vec2<f32>(u.aspect, 1.0);
-        // Depth only adds distance, so a bubble that can't reach this far
-        // across the screen can be skipped before looking up its depth.
-        if length(across) >= radius + PORTAL_EDGE {
+        // The trail is in the order the spheres start, and no sphere
+        // arrives before it starts, so none of the rest can arrive any
+        // sooner.
+        let start = point.z + PORTAL_EDGE;
+        if start >= first {
+            break;
+        }
+        // Depth only adds distance, so a sphere that can't get here sooner
+        // going straight across the screen can be skipped before looking
+        // up its depth.
+        let across = length((screen_uv - point.xy) * vec2<f32>(u.aspect, 1.0));
+        if start + pace(across + bump) * growth >= first {
             continue;
         }
-        let point_rank = depth_rank(ranks, load_depth(depth_tex, crop(point.xy, u.uv_scale)));
-        let offset = vec3<f32>(across, (rank - point_rank) * PORTAL_DEPTH);
-        let inside = 1.0 - smoothstep(radius - PORTAL_EDGE, radius + PORTAL_EDGE, length(offset));
-        weight = max(weight, inside);
+        let center = scene_point(point.xy, load_depth(depth_tex, crop(point.xy, u.uv_scale)));
+        first = min(first, start + pace(distance(here, center) + bump) * growth);
     }
-    return weight;
+    return timing(first);
 }
 
 // How far a pixel has changed into the next wallpaper, for its colour and
@@ -238,14 +297,9 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
         // as a morph rather than a crossfade.
         return Blend(smoothstep(0.25, 1.0, t), smoothstep(0.0, 0.75, t), 0.0);
     }
-    if u.style == DISSOLVE {
-        // Half depth order, as in sweep-in, and half random blobs.
-        let next_rank = depth_rank(next_ranks, next_depth);
-        let weight = swept(mix(1.0 - next_rank, blobs(screen_uv), 0.5), t);
-        return Blend(weight, weight, 0.0);
-    }
-    if u.style == PORTAL {
-        let weight = portal_weight(screen_uv, depth_rank(ranks, depth), t);
+    if u.style == PORTAL || u.style == DISSOLVE {
+        let arrival = portal_arrival(screen_uv, depth);
+        let weight = smoothstep(arrival - PORTAL_EDGE, arrival + PORTAL_EDGE, t);
         return Blend(weight, weight, 0.0);
     }
     if u.style == TIDE_IN || u.style == TIDE_OUT {
