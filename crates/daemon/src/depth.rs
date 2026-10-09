@@ -70,6 +70,79 @@ impl DepthMap {
     }
 }
 
+/// How many cells across and down `DepthMap::grid` divides a map into.
+pub const GRID_CELLS: usize = 32;
+
+/// The range of depths in each cell of a coarse grid over a depth map, so
+/// the CPU can tell roughly where things are in the scene without reading
+/// the map back from the GPU.
+#[derive(Clone)]
+pub struct DepthGrid {
+    /// GRID_CELLS rows of GRID_CELLS cells.
+    pub cells: Vec<DepthCell>,
+}
+
+/// Depths from 0 to 1 in one cell of a `DepthGrid`.
+#[derive(Clone, Copy)]
+pub struct DepthCell {
+    pub least: f32,
+    pub greatest: f32,
+    pub mean: f32,
+}
+
+impl DepthGrid {
+    /// For a wallpaper without a depth map, which the GPU sees as all 0.
+    pub fn flat() -> Self {
+        let cell = DepthCell {
+            least: 0.0,
+            greatest: 0.0,
+            mean: 0.0,
+        };
+        Self {
+            cells: vec![cell; GRID_CELLS * GRID_CELLS],
+        }
+    }
+}
+
+impl DepthMap {
+    /// The map's `DepthGrid`. A pixel at (x, y) is in the cell
+    /// `x * GRID_CELLS / width` across and `y * GRID_CELLS / height` down.
+    pub fn grid(&self) -> DepthGrid {
+        // The least, greatest and total depth in each cell, and how many
+        // pixels it has.
+        let mut sums = vec![(f32::MAX, f32::MIN, 0.0, 0u32); GRID_CELLS * GRID_CELLS];
+        let width = self.width.max(1) as usize;
+        for (i, &d) in self.data.iter().enumerate() {
+            let col = (i % width) * GRID_CELLS / width;
+            let row = (i / width) * GRID_CELLS / self.height as usize;
+            let (least, greatest, total, count) = &mut sums[row * GRID_CELLS + col];
+            let d = f32::from(d) / 65535.0;
+            *least = least.min(d);
+            *greatest = greatest.max(d);
+            *total += d;
+            *count += 1;
+        }
+        let cells = sums
+            .into_iter()
+            .map(|(least, greatest, total, count)| match count {
+                // A map smaller than the grid leaves some cells empty, so
+                // they allow any depth.
+                0 => DepthCell {
+                    least: 0.0,
+                    greatest: 1.0,
+                    mean: 0.5,
+                },
+                _ => DepthCell {
+                    least,
+                    greatest,
+                    mean: total / count as f32,
+                },
+            })
+            .collect();
+        DepthGrid { cells }
+    }
+}
+
 /// Where the tide takes the horizon to be, as a fraction of the way down
 /// the image. Must match HORIZON in shader.wgsl.
 pub const HORIZON: f32 = 0.5;

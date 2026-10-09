@@ -1,4 +1,4 @@
-use crate::depth::{DepthMap, RANK_POINTS, load_depth_map};
+use crate::depth::{DepthGrid, DepthMap, GRID_CELLS, RANK_POINTS, load_depth_map};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use image::imageops::{self, FilterType};
@@ -23,11 +23,13 @@ struct Uniforms {
     style: u32,
     /// The screen's width over its height.
     aspect: f32,
-    /// The portal's trail: how many points are in use, how fast their
-    /// bubbles grow, and the points themselves, from `Trail`.
+    /// The portal's trail: how many points are in use, how far the first
+    /// sphere has to reach, the points themselves and how the spheres are
+    /// paced, from `Trail`.
     trail_len: u32,
-    portal_speed: f32,
+    portal_reach: f32,
     trail: [[f32; 4]; TRAIL_POINTS],
+    portal_pace: [[f32; 4]; PACE_POINTS.div_ceil(4)],
 }
 
 /// How many cursor positions a portal transition follows. Must match
@@ -36,39 +38,123 @@ const TRAIL_POINTS: usize = 32;
 /// How far the cursor moves, in screen heights, before the portal grows
 /// from a new point.
 const TRAIL_SPACING: f32 = 0.05;
-/// How much a difference in depth rank holds the portal back, in screen
-/// heights. Must match PORTAL_DEPTH in shader.wgsl.
-const PORTAL_DEPTH: f32 = 1.0;
-/// How soft the portal's edge is, in screen heights. Must match
-/// PORTAL_EDGE in shader.wgsl.
-const PORTAL_EDGE: f32 = 0.04;
+/// How close a depth of 0 is taken to be, which keeps the farthest pixels
+/// at a finite distance, as with the tide's TIDE_NEAR. Must match
+/// PORTAL_NEAR in shader.wgsl.
+const PORTAL_NEAR: f32 = 0.1;
+/// How many distances `Trail::pace` covers. Must match PACE_POINTS in
+/// shader.wgsl.
+const PACE_POINTS: usize = 33;
 
 /// Where the cursor has been during a portal transition. The new wallpaper
-/// grows from each point like a bubble, from when the cursor got there.
+/// grows from each point like a sphere, from when the cursor got there.
 #[derive(Clone, Copy)]
 struct Trail {
     /// x and y in screen uv, then the transition's progress when the cursor
     /// was there. The fourth number pads to the shader's vec4.
     points: [[f32; 4]; TRAIL_POINTS],
     len: usize,
-    /// How fast the bubbles grow, so the first reaches the furthest corner
-    /// just as the transition ends.
-    speed: f32,
+    /// The furthest any pixel can be from where the first sphere starts,
+    /// in the units of scene_point in shader.wgsl.
+    reach: f32,
+    /// How far through its growth a sphere is, from 0 to 1, once it has
+    /// grown to each of PACE_POINTS evenly spaced distances out to `reach`,
+    /// packed four to a vec4 for the shader. It's the fraction of the
+    /// screen within that distance of the first sphere's centre, so the
+    /// spheres change a similar amount of the picture at every moment, like
+    /// the ranks the sweeps use.
+    pace: [[f32; 4]; PACE_POINTS.div_ceil(4)],
 }
 
 impl Trail {
-    fn new(cursor: [f32; 2], aspect: f32) -> Self {
-        // The furthest any pixel can be from where it starts, across the
-        // screen and in depth.
-        let far_x = cursor[0].max(1.0 - cursor[0]) * aspect;
-        let far_y = cursor[1].max(1.0 - cursor[1]);
-        let reach = (far_x * far_x + far_y * far_y + PORTAL_DEPTH * PORTAL_DEPTH).sqrt();
+    /// Start a trail at `cursor`, over a wallpaper with depths `grid`,
+    /// cropped by `uv_scale` to fit a screen `aspect` wide.
+    fn new(cursor: [f32; 2], aspect: f32, grid: &DepthGrid, uv_scale: [f32; 2]) -> Self {
+        // As crop in shader.wgsl, and back again.
+        let zoom = |axis: usize| uv_scale[axis] * (1.0 - 2.0 * MARGIN);
+        let to_image = |screen: f32, axis: usize| 0.5 + (screen - 0.5) * zoom(axis);
+        let to_screen = |image: f32, axis: usize| 0.5 + (image - 0.5) / zoom(axis);
+        let cell = |image: f32| ((image * GRID_CELLS as f32) as usize).min(GRID_CELLS - 1);
+        // As scene_point in shader.wgsl.
+        let point = |screen: [f32; 2], depth: f32| {
+            [
+                (screen[0] - 0.5) * aspect,
+                screen[1] - 0.5,
+                -(depth + PORTAL_NEAR).ln(),
+            ]
+        };
+        let distance =
+            |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
+
+        // The depth under the cursor is somewhere in the range of its cell
+        // or the ones around it, in case it's just over the edge.
+        let (col, row) = (cell(to_image(cursor[0], 0)), cell(to_image(cursor[1], 1)));
+        let mut under = [f32::MAX, f32::MIN];
+        for r in row.saturating_sub(1)..(row + 2).min(GRID_CELLS) {
+            for c in col.saturating_sub(1)..(col + 2).min(GRID_CELLS) {
+                let cell = grid.cells[r * GRID_CELLS + c];
+                under = [under[0].min(cell.least), under[1].max(cell.greatest)];
+            }
+        }
+        let center = point(cursor, grid.cells[row * GRID_CELLS + col].mean);
+
+        // A cell's pixels are within its part of the screen and its range
+        // of depths, so the furthest of them is no further than one of its
+        // corners at one end of that range, from either end of the range
+        // under the cursor. For pacing, each cell counts as its area at its
+        // middle and mean depth.
+        let mut reach: f32 = 1e-6;
+        let mut cells = Vec::with_capacity(grid.cells.len());
+        for row in 0..GRID_CELLS {
+            let top = to_screen(row as f32 / GRID_CELLS as f32, 1).max(0.0);
+            let bottom = to_screen((row + 1) as f32 / GRID_CELLS as f32, 1).min(1.0);
+            for col in 0..GRID_CELLS {
+                let left = to_screen(col as f32 / GRID_CELLS as f32, 0).max(0.0);
+                let right = to_screen((col + 1) as f32 / GRID_CELLS as f32, 0).min(1.0);
+                // Cropped off the screen.
+                if top >= bottom || left >= right {
+                    continue;
+                }
+                let depths = grid.cells[row * GRID_CELLS + col];
+                for x in [left, right] {
+                    for y in [top, bottom] {
+                        for depth in [depths.least, depths.greatest] {
+                            for from in under {
+                                let d = distance(point([x, y], depth), point(cursor, from));
+                                reach = reach.max(d);
+                            }
+                        }
+                    }
+                }
+                let middle = [(left + right) / 2.0, (top + bottom) / 2.0];
+                let area = (right - left) * (bottom - top);
+                cells.push((distance(point(middle, depths.mean), center), area));
+            }
+        }
+
+        // How much of the screen is within each distance.
+        let mut within = [0.0; PACE_POINTS];
+        for (d, area) in cells {
+            let step = (d / reach * (PACE_POINTS - 1) as f32).ceil() as usize;
+            within[step.min(PACE_POINTS - 1)] += area;
+        }
+        let mut total = 0.0;
+        for w in &mut within {
+            total += *w;
+            *w = total;
+        }
+        let mut pace = [[0.0; 4]; PACE_POINTS.div_ceil(4)];
+        for (i, w) in within.into_iter().enumerate() {
+            pace[i / 4][i % 4] = w / total;
+        }
+
         let mut points = [[0.0; 4]; TRAIL_POINTS];
         points[0] = [cursor[0], cursor[1], 0.0, 0.0];
         Self {
             points,
             len: 1,
-            speed: reach + 2.0 * PORTAL_EDGE,
+            reach,
+            pace,
         }
     }
 
@@ -100,6 +186,8 @@ pub struct DecodedWallpaper {
     /// From `DepthMap::ranks` and `DepthMap::height_ranks`, for ordering
     /// transitions.
     ranks: Vec<[f32; 2]>,
+    /// From `DepthMap::grid`, for the portal.
+    grid: DepthGrid,
     files: WallpaperFiles,
 }
 
@@ -139,10 +227,12 @@ impl DecodedWallpaper {
                 .collect(),
             None => vec![[0.5, 0.5]; RANK_POINTS],
         };
+        let grid = depth.as_ref().map_or_else(DepthGrid::flat, DepthMap::grid);
         Ok(Self {
             color,
             depth,
             ranks,
+            grid,
             files: (color_path.to_path_buf(), depth_path.to_path_buf()),
         })
     }
@@ -173,6 +263,8 @@ pub struct Wallpaper {
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
     ranks: wgpu::TextureView,
+    /// Where things are in the scene, roughly, for the portal.
+    grid: DepthGrid,
     /// Image size in pixels, for cropping to the screen's aspect ratio.
     size: (u32, u32),
     pub files: WallpaperFiles,
@@ -256,7 +348,12 @@ impl OutputRenderState {
             start: Instant::now(),
             duration,
             style,
-            trail: Trail::new([x + 0.5, y + 0.5], self.aspect()),
+            trail: Trail::new(
+                [x + 0.5, y + 0.5],
+                self.aspect(),
+                &self.current.grid,
+                cover_uv_scale(self.current.size, (self.config.width, self.config.height)),
+            ),
             frames: 0,
         });
     }
@@ -309,8 +406,9 @@ impl OutputRenderState {
             style: shader_style(style),
             aspect,
             trail_len: trail.map_or(0, |t| t.len as u32),
-            portal_speed: trail.map_or(0.0, |t| t.speed),
+            portal_reach: trail.map_or(0.0, |t| t.reach),
             trail: trail.map_or([[0.0; 4]; TRAIL_POINTS], |t| t.points),
+            portal_pace: trail.map_or(Zeroable::zeroed(), |t| t.pace),
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
@@ -574,6 +672,7 @@ impl Renderer {
                 None => self.depth_view.clone(),
             },
             ranks: self.upload_ranks(&decoded.ranks),
+            grid: decoded.grid.clone(),
             size: decoded.color.dimensions(),
             files: decoded.files.clone(),
         }
@@ -869,33 +968,123 @@ mod tests {
     fn portal_constants_match_the_shader() {
         let src = include_str!("shader.wgsl");
         for line in [
-            format!("const PORTAL_DEPTH: f32 = {PORTAL_DEPTH:?};"),
-            format!("const PORTAL_EDGE: f32 = {PORTAL_EDGE:?};"),
+            format!("const PORTAL_NEAR: f32 = {PORTAL_NEAR:?};"),
+            format!("const PACE_POINTS: u32 = {PACE_POINTS}u;"),
             format!("const TRAIL_POINTS: u32 = {TRAIL_POINTS}u;"),
         ] {
             assert!(src.contains(&line), "{line}");
         }
     }
 
+    /// How far a pixel at `screen` is from where a trail from `cursor`
+    /// starts, as portal_arrival in shader.wgsl works it out.
+    fn portal_distance(
+        map: &DepthMap,
+        uv_scale: [f32; 2],
+        aspect: f32,
+        cursor: [f32; 2],
+        screen: [f32; 2],
+    ) -> f32 {
+        // As crop, load_depth and scene_point in shader.wgsl.
+        let point = |s: [f32; 2]| {
+            let image = |axis: usize| 0.5 + (s[axis] - 0.5) * uv_scale[axis] * (1.0 - 2.0 * MARGIN);
+            let x = ((image(0) * map.width as f32) as u32).min(map.width - 1);
+            let y = ((image(1) * map.height as f32) as u32).min(map.height - 1);
+            let depth = f32::from(map.data[(y * map.width + x) as usize]) / 65535.0;
+            [
+                (s[0] - 0.5) * aspect,
+                s[1] - 0.5,
+                -(depth + PORTAL_NEAR).ln(),
+            ]
+        };
+        let (p, c) = (point(screen), point(cursor));
+        (0..3).map(|i| (p[i] - c[i]).powi(2)).sum::<f32>().sqrt()
+    }
+
+    /// As pace in shader.wgsl.
+    fn pace(trail: &Trail, distance: f32) -> f32 {
+        let x = (distance / trail.reach).clamp(0.0, 1.0) * (PACE_POINTS - 1) as f32;
+        let i = (x as usize).min(PACE_POINTS - 2);
+        let (a, b) = (
+            trail.pace[i / 4][i % 4],
+            trail.pace[(i + 1) / 4][(i + 1) % 4],
+        );
+        a + (b - a) * (x - i as f32)
+    }
+
+    /// A depth map wider than the screen, with depths from `depth` at
+    /// each pixel.
+    fn depth_map(depth: impl Fn(u32, u32) -> f32) -> DepthMap {
+        let (width, height) = (300, 160);
+        let data = (0..width * height)
+            .map(|i| (depth(i % width, i / width) * 65535.0) as u16)
+            .collect();
+        DepthMap {
+            data,
+            width,
+            height,
+        }
+    }
+
+    /// Pixel centres all over a 160 x 100 screen.
+    fn screen_pixels() -> impl Iterator<Item = [f32; 2]> {
+        (0..160 * 100).map(|i| {
+            [
+                ((i % 160) as f32 + 0.5) / 160.0,
+                ((i / 160) as f32 + 0.5) / 100.0,
+            ]
+        })
+    }
+
+    const CURSORS: [[f32; 2]; 4] = [[0.5, 0.5], [0.0, 0.0], [0.9, 0.2], [0.3, 0.97]];
+
     #[test]
-    fn the_first_bubble_reaches_every_corner_at_the_end() {
-        let aspect = 16.0 / 10.0;
-        for cursor in [[0.5, 0.5], [0.0, 0.0], [0.9, 0.2]] {
-            let trail = Trail::new(cursor, aspect);
-            let radius = trail.speed - PORTAL_EDGE;
-            for corner in [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]] {
-                let dx = (corner[0] - cursor[0]) * aspect;
-                let dy = corner[1] - cursor[1];
-                // The furthest a pixel can be, counting a full step in depth.
-                let far = (dx * dx + dy * dy + PORTAL_DEPTH * PORTAL_DEPTH).sqrt();
-                assert!(radius - PORTAL_EDGE >= far - 1e-5, "{cursor:?} {corner:?}");
+    fn the_portal_reaches_every_pixel() {
+        // A slope with sharp bumps all over it.
+        let map =
+            depth_map(|x, y| y as f32 / 160.0 * 0.6 + ((x * 7 + y * 13) % 23) as f32 / 22.0 * 0.4);
+        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+        for cursor in CURSORS {
+            let trail = Trail::new(cursor, 1.6, &map.grid(), uv_scale);
+            for screen in screen_pixels() {
+                let distance = portal_distance(&map, uv_scale, 1.6, cursor, screen);
+                // To within a pixel.
+                assert!(distance <= trail.reach + 1e-3, "{cursor:?} {screen:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_portal_changes_the_picture_steadily() {
+        // A slope, and a slope with a few specks far away, like sky through
+        // trees, which shouldn't hold the rest up.
+        let slope = |_, y| y as f32 / 160.0;
+        let specks = |x, y| {
+            if (x + y * 3) % 97 == 0 {
+                0.0
+            } else {
+                0.5 + y as f32 / 320.0
+            }
+        };
+        for map in [depth_map(slope), depth_map(specks)] {
+            let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+            for cursor in CURSORS {
+                let trail = Trail::new(cursor, 1.6, &map.grid(), uv_scale);
+                let paces: Vec<f32> = screen_pixels()
+                    .map(|s| pace(&trail, portal_distance(&map, uv_scale, 1.6, cursor, s)))
+                    .collect();
+                for part in [0.25, 0.5, 0.75] {
+                    let done =
+                        paces.iter().filter(|&&p| p <= part).count() as f32 / paces.len() as f32;
+                    assert!((done - part).abs() < 0.1, "{cursor:?} {part} {done}");
+                }
             }
         }
     }
 
     #[test]
     fn the_trail_follows_the_cursor_in_steps() {
-        let mut trail = Trail::new([0.5, 0.5], 1.0);
+        let mut trail = Trail::new([0.5, 0.5], 1.0, &DepthGrid::flat(), [1.0, 1.0]);
         trail.follow([0.51, 0.5], 0.1, 1.0);
         assert_eq!(trail.len, 1, "a small move doesn't add a point");
         trail.follow([0.6, 0.5], 0.2, 1.0);

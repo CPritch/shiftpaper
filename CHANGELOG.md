@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `portal` grows like a sphere from the surface under the cursor, so it spreads over that first and wraps round things nearer and further away.
+
 ## 0.4.2 - 2026-10-06
 
 ### Fixed

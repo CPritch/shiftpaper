@@ -82,8 +82,8 @@ pub enum Transition {
     /// Patches of the new wallpaper appear at random, nearer things
     /// tending to go first.
     Dissolve,
-    /// The new wallpaper grows out from the cursor like a bubble in the
-    /// scene, following it if it moves.
+    /// The new wallpaper grows out from the cursor like a sphere in the
+    /// scene, and follows the cursor if it moves.
     Portal,
     /// The new wallpaper rises through the old like a tide coming in,
     /// lowest places first.
