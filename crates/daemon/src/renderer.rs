@@ -1,10 +1,12 @@
-use crate::depth::{DepthGrid, DepthMap, GRID_CELLS, Ground, RANK_POINTS, load_depth_map};
+use crate::depth::{
+    DepthCell, DepthGrid, DepthMap, GRID_CELLS, Ground, RANK_POINTS, load_depth_map,
+};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use image::imageops::{self, FilterType};
 use shiftpaper_config::Transition;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use wgpu::CurrentSurfaceTexture;
 use wgpu::util::DeviceExt;
@@ -23,20 +25,21 @@ struct Uniforms {
     style: u32,
     /// The screen's width over its height.
     aspect: f32,
-    /// The portal's trail: how many points are in use, how far the first
-    /// sphere has to reach, the points themselves and how the spheres are
-    /// paced, from `Trail`.
+    /// Where the spheres of a portal or dissolve grow from: how many points
+    /// are in use, how far a sphere grows, the points themselves, how the
+    /// spheres are paced and when they show, from `Trail`.
     trail_len: u32,
     portal_reach: f32,
     trail: [[f32; 4]; TRAIL_POINTS],
     portal_pace: [[f32; 4]; PACE_POINTS.div_ceil(4)],
+    portal_timing: [[f32; 4]; PACE_POINTS.div_ceil(4)],
     /// Where the ground is in each wallpaper, for the tide.
     ground: [f32; 4],
     next_ground: [f32; 4],
 }
 
-/// How many cursor positions a portal transition follows. Must match
-/// TRAIL_POINTS in shader.wgsl.
+/// How many points a trail can hold. Must match TRAIL_POINTS in
+/// shader.wgsl.
 const TRAIL_POINTS: usize = 32;
 /// How far the cursor moves, in screen heights, before the portal grows
 /// from a new point.
@@ -45,101 +48,73 @@ const TRAIL_SPACING: f32 = 0.05;
 /// at a finite distance, as with the tide's TIDE_NEAR. Must match
 /// PORTAL_NEAR in shader.wgsl.
 const PORTAL_NEAR: f32 = 0.1;
-/// How many distances `Trail::pace` covers. Must match PACE_POINTS in
-/// shader.wgsl.
+/// How many distances `Trail::pace` covers, and times `Trail::timing`
+/// does. Must match PACE_POINTS in shader.wgsl.
 const PACE_POINTS: usize = 33;
+/// How soft the edge of a sphere is, as a fraction of the transition.
+/// Must match PORTAL_EDGE in shader.wgsl.
+const PORTAL_EDGE: f32 = 0.015;
+/// How many spheres a dissolve grows, at most.
+const DISSOLVE_SPHERES: usize = 16;
+/// How far through a dissolve its last sphere starts.
+const DISSOLVE_SPAWNING: f32 = 0.7;
+/// The spheres in a dissolve start at this power of how far through
+/// DISSOLVE_SPAWNING they are, so below 1 they start more often as it goes.
+const DISSOLVE_QUICKENING: f32 = 0.8;
+/// How many times likelier a dissolve's spheres are to start among the
+/// furthest things than among the nearest.
+const DISSOLVE_FAR: f32 = 20.0;
 
-/// Where the cursor has been during a portal transition. The new wallpaper
-/// grows from each point like a sphere, from when the cursor got there.
+/// Where the spheres of a portal or dissolve grow from. The new wallpaper
+/// grows from each point like a sphere, from its start: for the portal,
+/// from when the cursor got there.
 #[derive(Clone, Copy)]
 struct Trail {
-    /// x and y in screen uv, then the transition's progress when the cursor
-    /// was there. The fourth number pads to the shader's vec4.
+    /// x and y in screen uv, then the transition's progress when the
+    /// sphere starts. The fourth number pads to the shader's vec4. They're
+    /// in the order they start.
     points: [[f32; 4]; TRAIL_POINTS],
     len: usize,
-    /// The furthest any pixel can be from where the first sphere starts,
-    /// in the units of scene_point in shader.wgsl.
+    /// For the portal, the furthest any pixel can be from where the first
+    /// sphere starts, and for the dissolve, how far a sphere grows over the
+    /// whole transition, in the units of scene_point in shader.wgsl.
     reach: f32,
     /// How far through its growth a sphere is, from 0 to 1, once it has
     /// grown to each of PACE_POINTS evenly spaced distances out to `reach`,
-    /// packed four to a vec4 for the shader. It's the fraction of the
-    /// screen within that distance of the first sphere's centre, so the
-    /// spheres change a similar amount of the picture at every moment, like
-    /// the ranks the sweeps use.
+    /// packed four to a vec4 for the shader. For the portal, it's the
+    /// fraction of the screen within that distance of the first sphere's
+    /// centre, so the spheres change a similar amount of the picture at
+    /// every moment, like the ranks the sweeps use. The dissolve's spheres
+    /// grow steadily.
     pace: [[f32; 4]; PACE_POINTS.div_ceil(4)],
+    /// When a pixel switches, at each of PACE_POINTS evenly spaced times
+    /// from 0 to 1 that the first sphere could reach it, packed like
+    /// `pace`. The portal's pace already keeps it steady, so it switches
+    /// then. The dissolve's spheres start at different times, so instead
+    /// it's when that much of the screen has been reached, which keeps it
+    /// steady.
+    timing: [[f32; 4]; PACE_POINTS.div_ceil(4)],
 }
 
 impl Trail {
-    /// Start a trail at `cursor`, over a wallpaper with depths `grid`,
-    /// cropped by `uv_scale` to fit a screen `aspect` wide.
+    /// Start a portal's trail at `cursor`, over a wallpaper with depths
+    /// `grid`, cropped by `uv_scale` to fit a screen `aspect` wide.
     fn new(cursor: [f32; 2], aspect: f32, grid: &DepthGrid, uv_scale: [f32; 2]) -> Self {
-        // As crop in shader.wgsl, and back again.
-        let zoom = |axis: usize| uv_scale[axis] * (1.0 - 2.0 * MARGIN);
-        let to_image = |screen: f32, axis: usize| 0.5 + (screen - 0.5) * zoom(axis);
-        let to_screen = |image: f32, axis: usize| 0.5 + (image - 0.5) / zoom(axis);
-        let cell = |image: f32| ((image * GRID_CELLS as f32) as usize).min(GRID_CELLS - 1);
-        // As scene_point in shader.wgsl.
-        let point = |screen: [f32; 2], depth: f32| {
-            [
-                (screen[0] - 0.5) * aspect,
-                screen[1] - 0.5,
-                -(depth + PORTAL_NEAR).ln(),
-            ]
-        };
-        let distance =
-            |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
+        let (under, mean) = depths_around(cursor, grid, uv_scale);
+        let center = scene_point(cursor, mean, aspect);
+        let cells = screen_cells(grid, uv_scale);
+        let reach = cells
+            .iter()
+            .map(|cell| cell.furthest_from(cursor, under, aspect))
+            .fold(1e-6, f32::max);
 
-        // The depth under the cursor is somewhere in the range of its cell
-        // or the ones around it, in case it's just over the edge.
-        let (col, row) = (cell(to_image(cursor[0], 0)), cell(to_image(cursor[1], 1)));
-        let mut under = [f32::MAX, f32::MIN];
-        for r in row.saturating_sub(1)..(row + 2).min(GRID_CELLS) {
-            for c in col.saturating_sub(1)..(col + 2).min(GRID_CELLS) {
-                let cell = grid.cells[r * GRID_CELLS + c];
-                under = [under[0].min(cell.least), under[1].max(cell.greatest)];
-            }
-        }
-        let center = point(cursor, grid.cells[row * GRID_CELLS + col].mean);
-
-        // A cell's pixels are within its part of the screen and its range
-        // of depths, so the furthest of them is no further than one of its
-        // corners at one end of that range, from either end of the range
-        // under the cursor. For pacing, each cell counts as its area at its
-        // middle and mean depth.
-        let mut reach: f32 = 1e-6;
-        let mut cells = Vec::with_capacity(grid.cells.len());
-        for row in 0..GRID_CELLS {
-            let top = to_screen(row as f32 / GRID_CELLS as f32, 1).max(0.0);
-            let bottom = to_screen((row + 1) as f32 / GRID_CELLS as f32, 1).min(1.0);
-            for col in 0..GRID_CELLS {
-                let left = to_screen(col as f32 / GRID_CELLS as f32, 0).max(0.0);
-                let right = to_screen((col + 1) as f32 / GRID_CELLS as f32, 0).min(1.0);
-                // Cropped off the screen.
-                if top >= bottom || left >= right {
-                    continue;
-                }
-                let depths = grid.cells[row * GRID_CELLS + col];
-                for x in [left, right] {
-                    for y in [top, bottom] {
-                        for depth in [depths.least, depths.greatest] {
-                            for from in under {
-                                let d = distance(point([x, y], depth), point(cursor, from));
-                                reach = reach.max(d);
-                            }
-                        }
-                    }
-                }
-                let middle = [(left + right) / 2.0, (top + bottom) / 2.0];
-                let area = (right - left) * (bottom - top);
-                cells.push((distance(point(middle, depths.mean), center), area));
-            }
-        }
-
-        // How much of the screen is within each distance.
+        // How much of the screen is within each distance. For this, each
+        // cell counts as its area at its middle and mean depth.
         let mut within = [0.0; PACE_POINTS];
-        for (d, area) in cells {
+        for cell in &cells {
+            let d = distance(cell.middle(aspect), center);
             let step = (d / reach * (PACE_POINTS - 1) as f32).ceil() as usize;
-            within[step.min(PACE_POINTS - 1)] += area;
+            within[step.min(PACE_POINTS - 1)] += cell.area();
         }
         let mut total = 0.0;
         for w in &mut within {
@@ -158,6 +133,125 @@ impl Trail {
             len: 1,
             reach,
             pace,
+            timing: table(|x| x),
+        }
+    }
+
+    /// Random points for a dissolve, over a wallpaper with depths `grid`,
+    /// cropped by `uv_scale` to fit a screen `aspect` wide. The spheres
+    /// start more and more often, each somewhere the ones before haven't
+    /// reached yet, and tend to start among the furthest things first.
+    /// `seed` picks the points.
+    fn scatter(aspect: f32, grid: &DepthGrid, uv_scale: [f32; 2], seed: u32) -> Self {
+        let cells = screen_cells(grid, uv_scale);
+        // How far away each cell is, as the fraction of the screen nearer
+        // than it.
+        let mut by_depth: Vec<usize> = (0..cells.len()).collect();
+        by_depth.sort_by(|&a, &b| cells[b].depths.mean.total_cmp(&cells[a].depths.mean));
+        let total: f32 = cells.iter().map(ScreenCell::area).sum();
+        let mut farness = vec![0.0; cells.len()];
+        let (mut nearer, mut level, mut depth) = (0.0, 0.0, f32::NAN);
+        for i in by_depth {
+            // Cells at the same depth are as far as each other.
+            if cells[i].depths.mean != depth {
+                (nearer, level, depth) = (nearer + level, 0.0, cells[i].depths.mean);
+            }
+            farness[i] = nearer / total;
+            level += cells[i].area();
+        }
+
+        // Each sphere grows over this much of the transition, as in
+        // portal_arrival in shader.wgsl.
+        let growth = 1.0 - 2.0 * PORTAL_EDGE;
+        let middles: Vec<[f32; 3]> = cells.iter().map(|cell| cell.middle(aspect)).collect();
+        // Where the spheres start if they grow `reach` over the transition,
+        // as screen uv and progress, and when the last cell is reached.
+        let spheres_for = |reach: f32| {
+            let mut random = Random::new(seed);
+            let mut spheres = Vec::new();
+            let mut reached = vec![f32::MAX; cells.len()];
+            for i in 0..DISSOLVE_SPHERES {
+                let start = DISSOLVE_SPAWNING
+                    * (i as f32 / (DISSOLVE_SPHERES - 1) as f32).powf(DISSOLVE_QUICKENING);
+                let weights: Vec<f32> = (cells.iter().zip(&farness).zip(&reached))
+                    .map(|((cell, far), &at)| match at <= start {
+                        true => 0.0,
+                        false => cell.area() * DISSOLVE_FAR.powf(*far),
+                    })
+                    .collect();
+                let Some(cell) = random.pick(&weights).map(|i| &cells[i]) else {
+                    break;
+                };
+                let at = [
+                    cell.left + (cell.right - cell.left) * random.next(),
+                    cell.top + (cell.bottom - cell.top) * random.next(),
+                ];
+                let center = scene_point(at, depths_around(at, grid, uv_scale).1, aspect);
+                for (r, middle) in reached.iter_mut().zip(&middles) {
+                    *r = r.min(start + distance(*middle, center) / reach * growth);
+                }
+                spheres.push((at, start, center));
+            }
+            (spheres, reached.into_iter().fold(0.0, f32::max))
+        };
+        // The slowest the spheres can grow and still reach every cell by
+        // the end, so the dissolve takes the whole transition.
+        let (mut slow, mut fast) = (0.01, 10.0);
+        for _ in 0..20 {
+            let reach = f32::sqrt(slow * fast);
+            match spheres_for(reach).1 <= growth {
+                true => fast = reach,
+                false => slow = reach,
+            }
+        }
+        let reach = fast;
+        let (mut spheres, _) = spheres_for(reach);
+        if spheres.is_empty() {
+            let center = scene_point(
+                [0.5, 0.5],
+                depths_around([0.5, 0.5], grid, uv_scale).1,
+                aspect,
+            );
+            spheres.push(([0.5, 0.5], 0.0, center));
+        }
+
+        // When the first sphere reaches each cell, as portal_arrival in
+        // shader.wgsl works it out, and how much of the screen has been
+        // reached by each time. A cell can hold things at quite different
+        // depths, so it counts as half its area at its mean depth and a
+        // quarter at each end of its range.
+        let mut arrivals = Vec::with_capacity(cells.len() * 3);
+        for cell in &cells {
+            let d = cell.depths;
+            for (depth, share) in [(d.least, 0.25), (d.mean, 0.5), (d.greatest, 0.25)] {
+                let at = scene_point(cell.center(), depth, aspect);
+                let first = (spheres.iter())
+                    .map(|&(_, start, center)| {
+                        let pace = (distance(at, center) / reach).min(1.0);
+                        start + PORTAL_EDGE + pace * growth
+                    })
+                    .fold(f32::MAX, f32::min);
+                arrivals.push((first, cell.area() * share));
+            }
+        }
+        let timing = table(|x| {
+            let reached: f32 = (arrivals.iter())
+                .filter(|&&(first, _)| first <= x)
+                .map(|&(_, area)| area)
+                .sum();
+            PORTAL_EDGE + reached / total * growth
+        });
+
+        let mut points = [[0.0; 4]; TRAIL_POINTS];
+        for (point, &(at, start, _)) in points.iter_mut().zip(&spheres) {
+            *point = [at[0], at[1], start, 0.0];
+        }
+        Self {
+            points,
+            len: spheres.len(),
+            reach,
+            pace: table(|x| x),
+            timing,
         }
     }
 
@@ -172,6 +266,171 @@ impl Trail {
             self.points[self.len] = [cursor[0], cursor[1], progress, 0.0];
             self.len += 1;
         }
+    }
+}
+
+/// `f` at PACE_POINTS evenly spaced points from 0 to 1, packed four to a
+/// vec4 for the shader.
+fn table(f: impl Fn(f32) -> f32) -> [[f32; 4]; PACE_POINTS.div_ceil(4)] {
+    let mut table = [[0.0; 4]; PACE_POINTS.div_ceil(4)];
+    for i in 0..PACE_POINTS {
+        table[i / 4][i % 4] = f(i as f32 / (PACE_POINTS - 1) as f32);
+    }
+    table
+}
+
+/// Where a pixel at `screen` is in the scene, as scene_point in
+/// shader.wgsl.
+fn scene_point(screen: [f32; 2], depth: f32, aspect: f32) -> [f32; 3] {
+    [
+        (screen[0] - 0.5) * aspect,
+        screen[1] - 0.5,
+        -(depth + PORTAL_NEAR).ln(),
+    ]
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
+}
+
+/// Screen uv to image uv for an image cropped by `uv_scale`, as crop in
+/// shader.wgsl, on one axis.
+fn to_image(screen: f32, uv_scale: f32) -> f32 {
+    0.5 + (screen - 0.5) * uv_scale * (1.0 - 2.0 * MARGIN)
+}
+
+/// The cell of a DepthGrid that image uv `image` is in, on one axis.
+fn grid_cell(image: f32) -> usize {
+    ((image * GRID_CELLS as f32) as usize).min(GRID_CELLS - 1)
+}
+
+/// The range of depths at `screen`, which is somewhere in the range of
+/// its cell of `grid` or the ones around it, in case it's just over the
+/// edge, and the mean depth of its cell.
+fn depths_around(screen: [f32; 2], grid: &DepthGrid, uv_scale: [f32; 2]) -> ([f32; 2], f32) {
+    let col = grid_cell(to_image(screen[0], uv_scale[0]));
+    let row = grid_cell(to_image(screen[1], uv_scale[1]));
+    let mut range = [f32::MAX, f32::MIN];
+    for r in row.saturating_sub(1)..(row + 2).min(GRID_CELLS) {
+        for c in col.saturating_sub(1)..(col + 2).min(GRID_CELLS) {
+            let cell = grid.cells[r * GRID_CELLS + c];
+            range = [range[0].min(cell.least), range[1].max(cell.greatest)];
+        }
+    }
+    (range, grid.cells[row * GRID_CELLS + col].mean)
+}
+
+/// A cell of a wallpaper's DepthGrid, and where it shows on the screen.
+struct ScreenCell {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    depths: DepthCell,
+}
+
+impl ScreenCell {
+    fn area(&self) -> f32 {
+        (self.right - self.left) * (self.bottom - self.top)
+    }
+
+    /// Its middle on the screen.
+    fn center(&self) -> [f32; 2] {
+        [
+            (self.left + self.right) / 2.0,
+            (self.top + self.bottom) / 2.0,
+        ]
+    }
+
+    /// Where its middle is in the scene, at its mean depth.
+    fn middle(&self, aspect: f32) -> [f32; 3] {
+        scene_point(self.center(), self.depths.mean, aspect)
+    }
+
+    /// The furthest any of its pixels can be in the scene from `screen`, at
+    /// a depth in the range `depths`. Its pixels are within its part of the
+    /// screen and its range of depths, so the furthest is no further than
+    /// one of its corners at one end of that range, from either end of
+    /// `depths`.
+    fn furthest_from(&self, screen: [f32; 2], depths: [f32; 2], aspect: f32) -> f32 {
+        let mut furthest: f32 = 0.0;
+        for x in [self.left, self.right] {
+            for y in [self.top, self.bottom] {
+                for depth in [self.depths.least, self.depths.greatest] {
+                    for from in depths {
+                        let d = distance(
+                            scene_point([x, y], depth, aspect),
+                            scene_point(screen, from, aspect),
+                        );
+                        furthest = furthest.max(d);
+                    }
+                }
+            }
+        }
+        furthest
+    }
+}
+
+/// The cells of `grid` that show on a screen, once cropped by `uv_scale`.
+fn screen_cells(grid: &DepthGrid, uv_scale: [f32; 2]) -> Vec<ScreenCell> {
+    // As crop in shader.wgsl, backwards.
+    let to_screen =
+        |image: f32, axis: usize| 0.5 + (image - 0.5) / (uv_scale[axis] * (1.0 - 2.0 * MARGIN));
+    let mut cells = Vec::with_capacity(grid.cells.len());
+    for row in 0..GRID_CELLS {
+        let top = to_screen(row as f32 / GRID_CELLS as f32, 1).max(0.0);
+        let bottom = to_screen((row + 1) as f32 / GRID_CELLS as f32, 1).min(1.0);
+        for col in 0..GRID_CELLS {
+            let left = to_screen(col as f32 / GRID_CELLS as f32, 0).max(0.0);
+            let right = to_screen((col + 1) as f32 / GRID_CELLS as f32, 0).min(1.0);
+            // Cropped off the screen.
+            if top >= bottom || left >= right {
+                continue;
+            }
+            cells.push(ScreenCell {
+                left,
+                right,
+                top,
+                bottom,
+                depths: grid.cells[row * GRID_CELLS + col],
+            });
+        }
+    }
+    cells
+}
+
+/// Pseudo-random numbers, the same ones for the same seed.
+struct Random(u32);
+
+impl Random {
+    fn new(seed: u32) -> Self {
+        // Any seed but 0, which would only give 0.
+        Self(seed.wrapping_mul(0x9e37_79b9) | 1)
+    }
+
+    /// A number from 0 to 1.
+    fn next(&mut self) -> f32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 17;
+        self.0 ^= self.0 << 5;
+        (self.0 >> 8) as f32 / (1 << 24) as f32
+    }
+
+    /// An index into `weights`, more likely the bigger its weight, or None
+    /// if they're all 0.
+    fn pick(&mut self, weights: &[f32]) -> Option<usize> {
+        let total: f32 = weights.iter().sum();
+        if total <= 0.0 {
+            return None;
+        }
+        let mut left = self.next() * total;
+        for (i, &w) in weights.iter().enumerate() {
+            if left < w {
+                return Some(i);
+            }
+            left -= w;
+        }
+        weights.iter().rposition(|&w| w > 0.0)
     }
 }
 
@@ -352,17 +611,27 @@ impl OutputRenderState {
         }
         self.bind_group = renderer.create_bind_group(&self.current, &next, &self.uniform_buffer);
         let (x, y) = self.current_offset;
+        let uv_scale = cover_uv_scale(self.current.size, (self.config.width, self.config.height));
+        let trail = match style {
+            Transition::Dissolve => {
+                let seed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |t| t.subsec_nanos());
+                Trail::scatter(self.aspect(), &self.current.grid, uv_scale, seed)
+            }
+            _ => Trail::new(
+                [x + 0.5, y + 0.5],
+                self.aspect(),
+                &self.current.grid,
+                uv_scale,
+            ),
+        };
         self.transition = Some(ActiveTransition {
             next,
             start: Instant::now(),
             duration,
             style,
-            trail: Trail::new(
-                [x + 0.5, y + 0.5],
-                self.aspect(),
-                &self.current.grid,
-                cover_uv_scale(self.current.size, (self.config.width, self.config.height)),
-            ),
+            trail,
             frames: 0,
         });
     }
@@ -401,7 +670,9 @@ impl OutputRenderState {
             Some(t) => {
                 t.frames += 1;
                 let progress = transition_progress(t.start.elapsed(), t.duration);
-                t.trail.follow([nx + 0.5, ny + 0.5], progress, aspect);
+                if t.style == Transition::Portal {
+                    t.trail.follow([nx + 0.5, ny + 0.5], progress, aspect);
+                }
                 (progress, &t.next, t.style, Some(t.trail))
             }
             None => (0.0, &self.current, Transition::default(), None),
@@ -418,6 +689,7 @@ impl OutputRenderState {
             portal_reach: trail.map_or(0.0, |t| t.reach),
             trail: trail.map_or([[0.0; 4]; TRAIL_POINTS], |t| t.points),
             portal_pace: trail.map_or(Zeroable::zeroed(), |t| t.pace),
+            portal_timing: trail.map_or(Zeroable::zeroed(), |t| t.timing),
             ground: self.current.ground.0,
             next_ground: next.ground.0,
         };
@@ -981,6 +1253,7 @@ mod tests {
         let src = include_str!("shader.wgsl");
         for line in [
             format!("const PORTAL_NEAR: f32 = {PORTAL_NEAR:?};"),
+            format!("const PORTAL_EDGE: f32 = {PORTAL_EDGE:?};"),
             format!("const PACE_POINTS: u32 = {PACE_POINTS}u;"),
             format!("const TRAIL_POINTS: u32 = {TRAIL_POINTS}u;"),
         ] {
@@ -1092,6 +1365,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// When the pixel at `screen` switches in a dissolve, as portal_arrival
+    /// in shader.wgsl works it out, but without the noise.
+    fn dissolve_switches(
+        trail: &Trail,
+        map: &DepthMap,
+        uv_scale: [f32; 2],
+        screen: [f32; 2],
+    ) -> f32 {
+        let growth = 1.0 - 2.0 * PORTAL_EDGE;
+        let first = (trail.points[..trail.len].iter())
+            .map(|&[x, y, start, _]| {
+                let d = portal_distance(map, uv_scale, 1.6, [x, y], screen);
+                start + PORTAL_EDGE + pace(trail, d) * growth
+            })
+            .fold(2.0, f32::min);
+        // As timing in shader.wgsl.
+        let x = first.clamp(0.0, 1.0) * (PACE_POINTS - 1) as f32;
+        let i = (x as usize).min(PACE_POINTS - 2);
+        let (a, b) = (
+            trail.timing[i / 4][i % 4],
+            trail.timing[(i + 1) / 4][(i + 1) % 4],
+        );
+        a + (b - a) * (x - i as f32)
+    }
+
+    #[test]
+    fn the_dissolve_changes_the_picture_steadily() {
+        // A slope with sharp bumps all over it.
+        let map =
+            depth_map(|x, y| y as f32 / 160.0 * 0.6 + ((x * 7 + y * 13) % 23) as f32 / 22.0 * 0.4);
+        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+        for seed in 0..4 {
+            let trail = Trail::scatter(1.6, &map.grid(), uv_scale, seed);
+            let switches: Vec<f32> = screen_pixels()
+                .map(|s| dissolve_switches(&trail, &map, uv_scale, s))
+                .collect();
+            for part in [0.25, 0.5, 0.75, 1.0] {
+                let done =
+                    switches.iter().filter(|&&p| p <= part).count() as f32 / switches.len() as f32;
+                assert!((done - part).abs() < 0.1, "{seed} {part} {done}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_dissolve_starts_far_away_and_quickens() {
+        // Far away at the top.
+        let map = depth_map(|_, y| y as f32 / 160.0);
+        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+        let mut first_heights = 0.0;
+        for seed in 0..20 {
+            let trail = Trail::scatter(1.6, &map.grid(), uv_scale, seed);
+            first_heights += trail.points[0][1] / 20.0;
+            let starts: Vec<f32> = trail.points[..trail.len].iter().map(|p| p[2]).collect();
+            assert!(trail.len > 1 && starts[0] == 0.0, "{starts:?}");
+            for gaps in starts.windows(3) {
+                assert!(gaps[2] - gaps[1] <= gaps[1] - gaps[0] + 1e-6, "{starts:?}");
+            }
+        }
+        assert!(first_heights < 0.4, "{first_heights}");
     }
 
     #[test]

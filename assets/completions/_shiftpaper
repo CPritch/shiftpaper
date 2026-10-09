@@ -70,7 +70,7 @@ _arguments "${_arguments_options[@]}" : \
 '::name -- The transition to use:((sweep-in\:"A wave sweeps into the scene\: the new wallpaper'\''s nearest things appear first, in front of the old one, and it fills in towards the distance"
 sweep-out\:"A wave sweeps out of the scene\: the old wallpaper'\''s background gives way to the new one first, and its nearest things go last"
 morph\:"Everything changes together, the shape of the scene a little ahead of its colours"
-dissolve\:"Patches of the new wallpaper appear at random, nearer things tending to go first"
+dissolve\:"The new wallpaper grows like spheres in the scene from random places, further things tending to go first"
 portal\:"The new wallpaper grows out from the cursor like a sphere in the scene, and follows the cursor if it moves"
 tide-in\:"The new wallpaper rises through the old like a tide coming in, lowest places first"
 tide-out\:"The old wallpaper drains away like a tide going out, uncovering the new one from the highest places down"))' \
