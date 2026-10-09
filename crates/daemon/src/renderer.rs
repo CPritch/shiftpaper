@@ -1,4 +1,4 @@
-use crate::depth::{DepthGrid, DepthMap, GRID_CELLS, RANK_POINTS, load_depth_map};
+use crate::depth::{DepthGrid, DepthMap, GRID_CELLS, Ground, RANK_POINTS, load_depth_map};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use image::imageops::{self, FilterType};
@@ -30,6 +30,9 @@ struct Uniforms {
     portal_reach: f32,
     trail: [[f32; 4]; TRAIL_POINTS],
     portal_pace: [[f32; 4]; PACE_POINTS.div_ceil(4)],
+    /// Where the ground is in each wallpaper, for the tide.
+    ground: [f32; 4],
+    next_ground: [f32; 4],
 }
 
 /// How many cursor positions a portal transition follows. Must match
@@ -188,6 +191,8 @@ pub struct DecodedWallpaper {
     ranks: Vec<[f32; 2]>,
     /// From `DepthMap::grid`, for the portal.
     grid: DepthGrid,
+    /// From `DepthMap::ground`, for the tide.
+    ground: Ground,
     files: WallpaperFiles,
 }
 
@@ -218,11 +223,12 @@ impl DecodedWallpaper {
                 map.resized(w, h)
             });
         }
+        let ground = depth.as_ref().map_or(Ground::LEVEL, DepthMap::ground);
         // A flat wallpaper is all one depth, so it changes all at once,
         // halfway through a transition.
         let ranks = match &depth {
             Some(map) => (map.ranks().into_iter())
-                .zip(map.height_ranks())
+                .zip(map.height_ranks(&ground))
                 .map(|(depth, height)| [depth, height])
                 .collect(),
             None => vec![[0.5, 0.5]; RANK_POINTS],
@@ -233,6 +239,7 @@ impl DecodedWallpaper {
             depth,
             ranks,
             grid,
+            ground,
             files: (color_path.to_path_buf(), depth_path.to_path_buf()),
         })
     }
@@ -265,6 +272,8 @@ pub struct Wallpaper {
     ranks: wgpu::TextureView,
     /// Where things are in the scene, roughly, for the portal.
     grid: DepthGrid,
+    /// Where the ground is, for the tide.
+    ground: Ground,
     /// Image size in pixels, for cropping to the screen's aspect ratio.
     size: (u32, u32),
     pub files: WallpaperFiles,
@@ -409,6 +418,8 @@ impl OutputRenderState {
             portal_reach: trail.map_or(0.0, |t| t.reach),
             trail: trail.map_or([[0.0; 4]; TRAIL_POINTS], |t| t.points),
             portal_pace: trail.map_or(Zeroable::zeroed(), |t| t.pace),
+            ground: self.current.ground.0,
+            next_ground: next.ground.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
@@ -673,6 +684,7 @@ impl Renderer {
             },
             ranks: self.upload_ranks(&decoded.ranks),
             grid: decoded.grid.clone(),
+            ground: decoded.ground,
             size: decoded.color.dimensions(),
             files: decoded.files.clone(),
         }
@@ -1097,14 +1109,9 @@ mod tests {
     }
 
     #[test]
-    fn tide_constants_match_the_shader() {
-        let src = include_str!("shader.wgsl");
-        for line in [
-            format!("const HORIZON: f32 = {:?};", crate::depth::HORIZON),
-            format!("const TIDE_NEAR: f32 = {:?};", crate::depth::TIDE_NEAR),
-        ] {
-            assert!(src.contains(&line), "{line}");
-        }
+    fn tide_near_matches_the_shader() {
+        let line = format!("const TIDE_NEAR: f32 = {:?};", crate::depth::TIDE_NEAR);
+        assert!(include_str!("shader.wgsl").contains(&line), "{line}");
     }
 
     #[test]

@@ -53,6 +53,10 @@ struct Uniforms {
     // How the portal's spheres are paced, PACE_POINTS of them four to
     // a vec4. See `pace`.
     portal_pace: array<vec4<f32>, 9>,
+    // Where the ground is in each wallpaper, for the tide. See
+    // `tide_height`.
+    ground: vec4<f32>,
+    next_ground: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
@@ -80,9 +84,7 @@ const PORTAL_EDGE: f32 = 0.015;
 const PORTAL_NOISE: f32 = 0.12;
 const PORTAL_NOISE_SCALE: f32 = 6.0;
 
-// Where the tide takes the horizon to be, down the image, and how close a
-// depth of 0 is. Must match depth.rs.
-const HORIZON: f32 = 0.5;
+// How close a depth of 0 is for the tide. Must match depth.rs.
 const TIDE_NEAR: f32 = 0.1;
 // Just under the tide's surface the water ripples and darkens a little.
 // How far down that goes, in height rank, how far the ripple moves the
@@ -171,11 +173,11 @@ fn blobs(screen_uv: vec2<f32>) -> f32 {
     return 0.7 * value_noise(p) + 0.3 * value_noise(p * 3.1 + 17.0);
 }
 
-// Roughly how high a point is in the scene, squashed into (-1, 1). Must
-// match tide_height in depth.rs, which explains it.
-fn tide_height(image_y: f32, depth: f32) -> f32 {
+// Roughly how high a point is in the scene above `ground`, squashed into
+// (-1, 1). Must match tide_height in depth.rs, which explains it.
+fn tide_height(uv: vec2<f32>, depth: f32, ground: vec4<f32>) -> f32 {
     let distance = 1.0 / (depth + TIDE_NEAR);
-    let height = (HORIZON - image_y) * distance;
+    let height = distance * dot(ground.xyz, vec3<f32>(uv, 1.0)) + ground.w;
     return height / (1.0 + abs(height));
 }
 
@@ -198,9 +200,9 @@ fn height_rank(table: texture_1d<f32>, height: f32) -> f32 {
 fn under_water(uv: vec2<f32>, depth: f32, next_uv: vec2<f32>, next_depth: f32, t: f32) -> f32 {
     let level = t * (1.0 + 2.0 * BAND) - BAND;
     if u.style == TIDE_IN {
-        return level - height_rank(ranks, tide_height(uv.y, depth));
+        return level - height_rank(ranks, tide_height(uv, depth, u.ground));
     }
-    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv.y, next_depth));
+    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv, next_depth, u.next_ground));
 }
 
 // Small waves across the tide's surface, which move as it does.
