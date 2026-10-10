@@ -1,8 +1,8 @@
 //! Steps through [slideshow]'s images on a timer.
 
-use crate::renderer::{DecodedWallpaper, Renderer, Wallpaper, WallpaperFiles};
 use anyhow::{Result, anyhow};
 use shiftpaper_config::SlideshowConfig;
+use shiftpaper_render::{DecodedWallpaper, Renderer, Wallpaper, WallpaperFiles};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 use tracing::{info, warn};

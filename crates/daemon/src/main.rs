@@ -1,9 +1,7 @@
 mod battery;
 mod config;
 mod cursor;
-mod depth;
 mod idle;
-mod renderer;
 mod slideshow;
 mod wayland;
 

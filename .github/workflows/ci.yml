@@ -16,6 +16,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # The render crate should build for Android too.
+          targets: aarch64-linux-android
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y libwayland-dev libxkbcommon-dev
@@ -29,6 +31,7 @@ jobs:
         run: |
           cargo check -p shiftpaper-cli --no-default-features --features load-dynamic
           cargo check -p shiftpaper-daemon
+          cargo check -p shiftpaper-render --target aarch64-linux-android
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -37,10 +40,12 @@ jobs:
         run: |
           cargo clippy -p shiftpaper-config --all-targets --all-features -- -D warnings
           cargo clippy -p shiftpaper-cli --all-targets --no-default-features --features load-dynamic -- -D warnings
+          cargo clippy -p shiftpaper-render --all-targets -- -D warnings
           cargo clippy -p shiftpaper-daemon --all-targets -- -D warnings
 
       - name: cargo test
         run: |
           cargo test -p shiftpaper-config --all-features
           cargo test -p shiftpaper-cli --no-default-features --features load-dynamic
+          cargo test -p shiftpaper-render
           cargo test -p shiftpaper-daemon

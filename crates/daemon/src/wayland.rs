@@ -39,12 +39,12 @@ use wayland_protocols::wp::{
 };
 
 use crate::cursor::HyprlandCursor;
-use crate::renderer::{DecodedWallpaper, OutputRenderState, Renderer, Wallpaper, WallpaperFiles};
 use crate::slideshow::Slideshow;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use shiftpaper_config::{Config, TrackingMode, Transition};
+use shiftpaper_render::{DecodedWallpaper, OutputRenderState, Renderer, Wallpaper, WallpaperFiles};
 
 pub struct OutputInfo {
     pub name: String,
@@ -512,6 +512,23 @@ struct PendingReload {
     slide: Option<(usize, WallpaperFiles)>,
 }
 
+/// A renderer on the low-power GPU through Vulkan, drawing in the format
+/// Wayland compositors take.
+async fn new_renderer() -> Result<Renderer> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            ..Default::default()
+        })
+        .await
+        .context("no suitable GPU adapter found")?;
+    Renderer::new(instance, adapter, wgpu::TextureFormat::Bgra8UnormSrgb).await
+}
+
 /// Decode a wallpaper on a background thread.
 fn decode(
     files: WallpaperFiles,
@@ -734,7 +751,7 @@ impl LayerShellHandler for App {
 
         if self.renderer.is_none() {
             info!("initializing wgpu renderer...");
-            match pollster::block_on(Renderer::new()) {
+            match pollster::block_on(new_renderer()) {
                 Ok(r) => self.renderer = Some(r),
                 Err(e) => {
                     warn!("failed to init renderer: {e:#}");
@@ -798,7 +815,7 @@ impl LayerShellHandler for App {
 
             let surface_config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                format: renderer.format,
                 width: buffer_w,
                 height: buffer_h,
                 present_mode: wgpu::PresentMode::Fifo,

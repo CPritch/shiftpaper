@@ -1,0 +1,23 @@
+[package]
+name = "shiftpaper-render"
+description = "Shiftpaper's depth parallax renderer, with no Wayland code, for any front end"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
+# Depth maps go to the GPU as 16-bit floats.
+half = { version = "2", features = ["bytemuck"] }
+
+image = { workspace = true, features = ["png"] }
+
+shiftpaper-config = { workspace = true }
+
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+# Same version wgpu uses internally, to validate shader.wgsl in tests.
+naga = { version = "30", features = ["wgsl-in"] }
