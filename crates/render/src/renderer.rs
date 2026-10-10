@@ -21,6 +21,8 @@ struct Uniforms {
     progress: f32,
     uv_scale: [f32; 2],
     next_uv_scale: [f32; 2],
+    uv_center: [f32; 2],
+    next_uv_center: [f32; 2],
     /// From `shader_style`.
     style: u32,
     /// The screen's width over its height.
@@ -98,11 +100,11 @@ struct Trail {
 
 impl Trail {
     /// Start a portal's trail at `cursor`, over a wallpaper with depths
-    /// `grid`, cropped by `uv_scale` to fit a screen `aspect` wide.
-    fn new(cursor: [f32; 2], aspect: f32, grid: &DepthGrid, uv_scale: [f32; 2]) -> Self {
-        let (under, mean) = depths_around(cursor, grid, uv_scale);
+    /// `grid`, cropped by `crop` to fit a screen `aspect` wide.
+    fn new(cursor: [f32; 2], aspect: f32, grid: &DepthGrid, crop: Crop) -> Self {
+        let (under, mean) = depths_around(cursor, grid, crop);
         let center = scene_point(cursor, mean, aspect);
-        let cells = screen_cells(grid, uv_scale);
+        let cells = screen_cells(grid, crop);
         let reach = cells
             .iter()
             .map(|cell| cell.furthest_from(cursor, under, aspect))
@@ -138,12 +140,12 @@ impl Trail {
     }
 
     /// Random points for a dissolve, over a wallpaper with depths `grid`,
-    /// cropped by `uv_scale` to fit a screen `aspect` wide. The spheres
+    /// cropped by `crop` to fit a screen `aspect` wide. The spheres
     /// start more and more often, each somewhere the ones before haven't
     /// reached yet, and tend to start among the furthest things first.
     /// `seed` picks the points.
-    fn scatter(aspect: f32, grid: &DepthGrid, uv_scale: [f32; 2], seed: u32) -> Self {
-        let cells = screen_cells(grid, uv_scale);
+    fn scatter(aspect: f32, grid: &DepthGrid, crop: Crop, seed: u32) -> Self {
+        let cells = screen_cells(grid, crop);
         // How far away each cell is, as the fraction of the screen nearer
         // than it.
         let mut by_depth: Vec<usize> = (0..cells.len()).collect();
@@ -186,7 +188,7 @@ impl Trail {
                     cell.left + (cell.right - cell.left) * random.next(),
                     cell.top + (cell.bottom - cell.top) * random.next(),
                 ];
-                let center = scene_point(at, depths_around(at, grid, uv_scale).1, aspect);
+                let center = scene_point(at, depths_around(at, grid, crop).1, aspect);
                 for (r, middle) in reached.iter_mut().zip(&middles) {
                     *r = r.min(start + distance(*middle, center) / reach * growth);
                 }
@@ -207,11 +209,7 @@ impl Trail {
         let reach = fast;
         let (mut spheres, _) = spheres_for(reach);
         if spheres.is_empty() {
-            let center = scene_point(
-                [0.5, 0.5],
-                depths_around([0.5, 0.5], grid, uv_scale).1,
-                aspect,
-            );
+            let center = scene_point([0.5, 0.5], depths_around([0.5, 0.5], grid, crop).1, aspect);
             spheres.push(([0.5, 0.5], 0.0, center));
         }
 
@@ -293,12 +291,6 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
 }
 
-/// Screen uv to image uv for an image cropped and zoomed by `uv_scale`,
-/// from `zoomed`, as crop in shader.wgsl, on one axis.
-fn to_image(screen: f32, uv_scale: f32) -> f32 {
-    0.5 + (screen - 0.5) * uv_scale
-}
-
 /// The cell of a DepthGrid that image uv `image` is in, on one axis.
 fn grid_cell(image: f32) -> usize {
     ((image * GRID_CELLS as f32) as usize).min(GRID_CELLS - 1)
@@ -307,9 +299,9 @@ fn grid_cell(image: f32) -> usize {
 /// The range of depths at `screen`, which is somewhere in the range of
 /// its cell of `grid` or the ones around it, in case it's just over the
 /// edge, and the mean depth of its cell.
-fn depths_around(screen: [f32; 2], grid: &DepthGrid, uv_scale: [f32; 2]) -> ([f32; 2], f32) {
-    let col = grid_cell(to_image(screen[0], uv_scale[0]));
-    let row = grid_cell(to_image(screen[1], uv_scale[1]));
+fn depths_around(screen: [f32; 2], grid: &DepthGrid, crop: Crop) -> ([f32; 2], f32) {
+    let col = grid_cell(crop.to_image(screen[0], 0));
+    let row = grid_cell(crop.to_image(screen[1], 1));
     let mut range = [f32::MAX, f32::MIN];
     for r in row.saturating_sub(1)..(row + 2).min(GRID_CELLS) {
         for c in col.saturating_sub(1)..(col + 2).min(GRID_CELLS) {
@@ -371,10 +363,9 @@ impl ScreenCell {
     }
 }
 
-/// The cells of `grid` that show on a screen, once cropped by `uv_scale`.
-fn screen_cells(grid: &DepthGrid, uv_scale: [f32; 2]) -> Vec<ScreenCell> {
-    // As crop in shader.wgsl, backwards.
-    let to_screen = |image: f32, axis: usize| 0.5 + (image - 0.5) / uv_scale[axis];
+/// The cells of `grid` that show on a screen, once cropped by `crop`.
+fn screen_cells(grid: &DepthGrid, crop: Crop) -> Vec<ScreenCell> {
+    let to_screen = |image: f32, axis: usize| crop.to_screen(image, axis);
     let mut cells = Vec::with_capacity(grid.cells.len());
     for row in 0..GRID_CELLS {
         let top = to_screen(row as f32 / GRID_CELLS as f32, 1).max(0.0);
@@ -444,11 +435,71 @@ fn margin(intensity: f32) -> f32 {
     MARGIN.max(0.5 * intensity)
 }
 
-/// `uv_scale` zoomed in by the margin at `intensity`, as crop in
-/// shader.wgsl does: how much of the image shows on each axis.
-fn zoomed(uv_scale: [f32; 2], intensity: f32) -> [f32; 2] {
-    let zoom = 1.0 - 2.0 * margin(intensity);
-    [uv_scale[0] * zoom, uv_scale[1] * zoom]
+/// Which part of a wallpaper shows: zoomed in `zoom` times, where 1 shows
+/// all of it that fits the screen's shape, around `center`, in image uv
+/// from the top left. The centre moves in as far as it has to for the
+/// image to cover the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub center: [f32; 2],
+    pub zoom: f32,
+}
+
+impl Default for View {
+    /// All of the image that fits the screen's shape, from its middle.
+    fn default() -> Self {
+        Self {
+            center: [0.5, 0.5],
+            zoom: 1.0,
+        }
+    }
+}
+
+/// The part of an image that shows on a screen: `scale` of it on each
+/// axis, around `center`, in image uv. As crop in shader.wgsl.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Crop {
+    scale: [f32; 2],
+    center: [f32; 2],
+}
+
+impl Crop {
+    /// How `view` shows an image of size `image` on a screen of size
+    /// `screen`. With `pan`, from 0 to 1, the horizontal centre goes from
+    /// as far left as the image allows to as far right instead.
+    fn new(image: (u32, u32), screen: (u32, u32), view: View, pan: Option<f32>) -> Self {
+        let cover = cover_uv_scale(image, screen);
+        let zoom = view.zoom.max(1.0);
+        let scale = [cover[0] / zoom, cover[1] / zoom];
+        let mut center = view.center;
+        if let Some(pan) = pan {
+            center[0] = scale[0] / 2.0 + pan.clamp(0.0, 1.0) * (1.0 - scale[0]);
+        }
+        let fit = |axis: usize| center[axis].clamp(scale[axis] / 2.0, 1.0 - scale[axis] / 2.0);
+        Self {
+            scale,
+            center: [fit(0), fit(1)],
+        }
+    }
+
+    /// Zoomed in by the margin at `intensity`, as crop in shader.wgsl.
+    fn zoomed(self, intensity: f32) -> Self {
+        let zoom = 1.0 - 2.0 * margin(intensity);
+        Self {
+            scale: [self.scale[0] * zoom, self.scale[1] * zoom],
+            center: self.center,
+        }
+    }
+
+    /// Screen uv to image uv, on `axis`.
+    fn to_image(self, screen: f32, axis: usize) -> f32 {
+        self.center[axis] + (screen - 0.5) * self.scale[axis]
+    }
+
+    /// Image uv to screen uv, on `axis`.
+    fn to_screen(self, image: f32, axis: usize) -> f32 {
+        0.5 + (image - self.center[axis]) / self.scale[axis]
+    }
 }
 
 /// A wallpaper's images decoded into memory, ready to upload. Decoding is
@@ -474,7 +525,8 @@ pub type WallpaperFiles = (PathBuf, PathBuf);
 impl DecodedWallpaper {
     /// Load a baked wallpaper. If it's bigger than any of `screens` needs,
     /// it's scaled down, which makes every frame cheaper to draw and
-    /// saves memory.
+    /// saves memory. To keep the detail for a `View` that zooms in, pass
+    /// the screen's size times the zoom.
     pub fn load(color_path: &Path, depth_path: &Path, screens: &[(u32, u32)]) -> Result<Self> {
         let mut color = image::open(color_path)
             .with_context(|| format!("failed to load image: {}", color_path.display()))?
@@ -515,6 +567,29 @@ impl DecodedWallpaper {
             files: (color_path.to_path_buf(), depth_path.to_path_buf()),
         })
     }
+
+    /// A copy shrunk so neither side is over `max` pixels, or None if it's
+    /// that small already.
+    fn within(&self, max: u32) -> Option<Self> {
+        let scale = limit_scale(self.color.dimensions(), max)?;
+        let fit = |size| {
+            let (w, h) = scale_size(size, scale);
+            (w.min(max), h.min(max))
+        };
+        let (w, h) = fit(self.color.dimensions());
+        warn!(w, h, "shrinking a wallpaper to the most the GPU takes");
+        Some(Self {
+            color: imageops::resize(&self.color, w, h, FilterType::Triangle),
+            depth: self.depth.as_ref().map(|map| {
+                let (w, h) = fit((map.width, map.height));
+                map.resized(w, h)
+            }),
+            ranks: self.ranks.clone(),
+            grid: self.grid.clone(),
+            ground: self.ground,
+            files: self.files.clone(),
+        })
+    }
 }
 
 /// How much to shrink an image so it still covers each of `screens` once
@@ -528,6 +603,13 @@ fn fit_scale((width, height): (u32, u32), screens: &[(u32, u32)]) -> Option<f32>
         // A stronger parallax zooms in a few percent more, too little to see.
         / (1.0 - 2.0 * MARGIN);
     (needed > 0.0 && needed < 1.0).then_some(needed)
+}
+
+/// How much to shrink an image so neither side is over `max` pixels, or
+/// None if it isn't.
+fn limit_scale((width, height): (u32, u32), max: u32) -> Option<f32> {
+    let longest = width.max(height);
+    (longest > max).then(|| max as f32 / longest as f32)
 }
 
 /// `size` multiplied by `scale`, rounded up.
@@ -550,6 +632,9 @@ pub struct Wallpaper {
     /// Image size in pixels, for cropping to the screen's aspect ratio.
     size: (u32, u32),
     pub files: WallpaperFiles,
+    /// Which part of it shows. Set it before showing the wallpaper, or with
+    /// `OutputRenderState::set_view` once it's showing.
+    pub view: View,
 }
 
 /// A transition to another wallpaper that's under way.
@@ -574,6 +659,10 @@ pub struct OutputRenderState {
     pub target_offset: (f32, f32),
     /// The intensity `step_and_write` last drew with, which sets the margin.
     intensity: f32,
+    /// From `set_pan`.
+    pan: Option<f32>,
+    /// Whether the view or pan changed since `step_and_write` last ran.
+    view_changed: bool,
 }
 
 impl OutputRenderState {
@@ -595,6 +684,8 @@ impl OutputRenderState {
             current_offset: (0.0, 0.0),
             target_offset: (0.0, 0.0),
             intensity: 0.0,
+            pan: None,
+            view_changed: false,
         }
     }
 
@@ -604,6 +695,26 @@ impl OutputRenderState {
         match &self.transition {
             Some(t) => &t.next,
             None => &self.current,
+        }
+    }
+
+    /// Show another part of the wallpaper: the one showing, or the one a
+    /// transition is changing to.
+    pub fn set_view(&mut self, view: View) {
+        match &mut self.transition {
+            Some(t) => t.next.view = view,
+            None => self.current.view = view,
+        }
+        self.view_changed = true;
+    }
+
+    /// Pan across the wallpaper, from as far left as it goes at 0 to as far
+    /// right at 1, in place of its view's horizontal centre, or stop with
+    /// None. For following the pages of a desktop or launcher.
+    pub fn set_pan(&mut self, pan: Option<f32>) {
+        if pan != self.pan {
+            self.pan = pan;
+            self.view_changed = true;
         }
     }
 
@@ -628,21 +739,15 @@ impl OutputRenderState {
         }
         self.bind_group = renderer.create_bind_group(&self.current, &next, &self.uniform_buffer);
         let (x, y) = self.current_offset;
-        let screen = (self.config.width, self.config.height);
-        let uv_scale = zoomed(cover_uv_scale(self.current.size, screen), self.intensity);
+        let crop = self.crop(&self.current).zoomed(self.intensity);
         let trail = match style {
             Transition::Dissolve => {
                 let seed = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |t| t.subsec_nanos());
-                Trail::scatter(self.aspect(), &self.current.grid, uv_scale, seed)
+                Trail::scatter(self.aspect(), &self.current.grid, crop, seed)
             }
-            _ => Trail::new(
-                [x + 0.5, y + 0.5],
-                self.aspect(),
-                &self.current.grid,
-                uv_scale,
-            ),
+            _ => Trail::new([x + 0.5, y + 0.5], self.aspect(), &self.current.grid, crop),
         };
         self.transition = Some(ActiveTransition {
             next,
@@ -672,6 +777,12 @@ impl OutputRenderState {
         self.config.width as f32 / self.config.height as f32
     }
 
+    /// The part of `wallpaper` that shows, before the margin.
+    fn crop(&self, wallpaper: &Wallpaper) -> Crop {
+        let screen = (self.config.width, self.config.height);
+        Crop::new(wallpaper.size, screen, wallpaper.view, self.pan)
+    }
+
     /// Step the lerp 30% of the way toward target_offset and write the new
     /// uniforms. Returns whether anything changed, so callers can skip
     /// redrawing once the offset has settled and no transition is running.
@@ -683,8 +794,8 @@ impl OutputRenderState {
         let ny = cy + (ty - cy) * 0.3;
         self.current_offset = (nx, ny);
 
-        let screen = (self.config.width, self.config.height);
         let aspect = self.aspect();
+        let crop = self.crop(&self.current);
         let (progress, next, style, trail) = match &mut self.transition {
             Some(t) => {
                 t.frames += 1;
@@ -696,12 +807,20 @@ impl OutputRenderState {
             }
             None => (0.0, &self.current, Transition::default(), None),
         };
+        let next_crop = Crop::new(
+            next.size,
+            (self.config.width, self.config.height),
+            next.view,
+            self.pan,
+        );
         let uniforms = Uniforms {
             cursor_offset: [nx, ny],
             intensity,
             progress,
-            uv_scale: cover_uv_scale(self.current.size, screen),
-            next_uv_scale: cover_uv_scale(next.size, screen),
+            uv_scale: crop.scale,
+            next_uv_scale: next_crop.scale,
+            uv_center: crop.center,
+            next_uv_center: next_crop.center,
             style: shader_style(style),
             aspect,
             trail_len: trail.map_or(0, |t| t.len as u32),
@@ -714,7 +833,8 @@ impl OutputRenderState {
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
-        moved || self.transition.is_some()
+        let view_changed = std::mem::take(&mut self.view_changed);
+        moved || view_changed || self.transition.is_some()
     }
 }
 
@@ -967,6 +1087,10 @@ impl Renderer {
     }
 
     pub fn upload_wallpaper(&self, decoded: &DecodedWallpaper) -> Wallpaper {
+        // A very wide or tall photo can be bigger than the GPU takes, even
+        // once shrunk to the screen.
+        let shrunk = decoded.within(self.device.limits().max_texture_dimension_2d);
+        let decoded = shrunk.as_ref().unwrap_or(decoded);
         Wallpaper {
             color: self.upload_color(&decoded.color),
             depth: match &decoded.depth {
@@ -978,6 +1102,7 @@ impl Renderer {
             ground: decoded.ground,
             size: decoded.color.dimensions(),
             files: decoded.files.clone(),
+            view: View::default(),
         }
     }
 
@@ -1255,6 +1380,58 @@ mod tests {
     }
 
     #[test]
+    fn a_view_zooms_in_around_its_centre() {
+        let view = View {
+            center: [0.3, 0.6],
+            zoom: 2.0,
+        };
+        let crop = Crop::new((3840, 2160), (2560, 1440), view, None);
+        assert_close(crop.scale, [0.5, 0.5]);
+        assert_close(crop.center, [0.3, 0.6]);
+        assert_close([crop.to_image(0.5, 0), crop.to_image(0.0, 1)], [0.3, 0.35]);
+        assert_close(
+            [crop.to_screen(0.3, 0), crop.to_screen(0.35, 1)],
+            [0.5, 0.0],
+        );
+    }
+
+    #[test]
+    fn a_view_keeps_the_screen_covered() {
+        let corner = View {
+            center: [0.0, 1.0],
+            zoom: 2.0,
+        };
+        let crop = Crop::new((3840, 2160), (2560, 1440), corner, None);
+        assert_close(crop.center, [0.25, 0.75]);
+        // It can't zoom out past the whole image.
+        let wide = View {
+            center: [0.2, 0.2],
+            zoom: 0.5,
+        };
+        let crop = Crop::new((3840, 2160), (2560, 1440), wide, None);
+        assert_close(crop.scale, [1.0, 1.0]);
+        assert_close(crop.center, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn panning_crosses_the_whole_image() {
+        // An image three screens wide.
+        let view = View::default();
+        let at = |pan| Crop::new((3000, 1000), (1000, 1000), view, Some(pan));
+        assert_close(at(0.0).center, [1.0 / 6.0, 0.5]);
+        assert_close(at(0.5).center, [0.5, 0.5]);
+        assert_close(at(1.0).center, [5.0 / 6.0, 0.5]);
+        assert_close(
+            [at(0.0).to_image(0.0, 0), at(1.0).to_image(1.0, 0)],
+            [0.0, 1.0],
+        );
+        // Zoomed in, there's further to go.
+        let zoomed = View { zoom: 2.0, ..view };
+        let crop = Crop::new((3000, 1000), (1000, 1000), zoomed, Some(1.0));
+        assert_close(crop.center, [11.0 / 12.0, 0.5]);
+    }
+
+    #[test]
     fn transition_numbers_match_the_shader() {
         let src = include_str!("shader.wgsl");
         for (name, style) in [
@@ -1288,14 +1465,14 @@ mod tests {
     /// starts, as portal_arrival in shader.wgsl works it out.
     fn portal_distance(
         map: &DepthMap,
-        uv_scale: [f32; 2],
+        crop: Crop,
         aspect: f32,
         cursor: [f32; 2],
         screen: [f32; 2],
     ) -> f32 {
         // As crop, load_depth and scene_point in shader.wgsl.
         let point = |s: [f32; 2]| {
-            let image = |axis: usize| 0.5 + (s[axis] - 0.5) * uv_scale[axis];
+            let image = |axis: usize| crop.to_image(s[axis], axis);
             let x = ((image(0) * map.width as f32) as u32).min(map.width - 1);
             let y = ((image(1) * map.height as f32) as u32).min(map.height - 1);
             let depth = f32::from(map.data[(y * map.width + x) as usize]) / 65535.0;
@@ -1346,18 +1523,33 @@ mod tests {
 
     const CURSORS: [[f32; 2]; 4] = [[0.5, 0.5], [0.0, 0.0], [0.9, 0.2], [0.3, 0.97]];
 
+    /// How `depth_map`s show on a 1600 x 1000 screen.
+    fn cover(map: &DepthMap) -> Crop {
+        Crop::new((map.width, map.height), (1600, 1000), View::default(), None)
+    }
+
     #[test]
     fn the_portal_reaches_every_pixel() {
         // A slope with sharp bumps all over it.
         let map =
             depth_map(|x, y| y as f32 / 160.0 * 0.6 + ((x * 7 + y * 13) % 23) as f32 / 22.0 * 0.4);
-        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
-        for cursor in CURSORS {
-            let trail = Trail::new(cursor, 1.6, &map.grid(), uv_scale);
-            for screen in screen_pixels() {
-                let distance = portal_distance(&map, uv_scale, 1.6, cursor, screen);
-                // To within a pixel.
-                assert!(distance <= trail.reach + 1e-3, "{cursor:?} {screen:?}");
+        // Zoomed in off centre, too.
+        let view = View {
+            center: [0.2, 0.7],
+            zoom: 1.7,
+        };
+        let zoomed = Crop::new((map.width, map.height), (1600, 1000), view, None);
+        for crop in [cover(&map), zoomed] {
+            for cursor in CURSORS {
+                let trail = Trail::new(cursor, 1.6, &map.grid(), crop);
+                for screen in screen_pixels() {
+                    let distance = portal_distance(&map, crop, 1.6, cursor, screen);
+                    // To within a pixel.
+                    assert!(
+                        distance <= trail.reach + 1e-3,
+                        "{crop:?} {cursor:?} {screen:?}"
+                    );
+                }
             }
         }
     }
@@ -1375,11 +1567,11 @@ mod tests {
             }
         };
         for map in [depth_map(slope), depth_map(specks)] {
-            let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+            let crop = cover(&map);
             for cursor in CURSORS {
-                let trail = Trail::new(cursor, 1.6, &map.grid(), uv_scale);
+                let trail = Trail::new(cursor, 1.6, &map.grid(), crop);
                 let paces: Vec<f32> = screen_pixels()
-                    .map(|s| pace(&trail, portal_distance(&map, uv_scale, 1.6, cursor, s)))
+                    .map(|s| pace(&trail, portal_distance(&map, crop, 1.6, cursor, s)))
                     .collect();
                 for part in [0.25, 0.5, 0.75] {
                     let done =
@@ -1392,16 +1584,11 @@ mod tests {
 
     /// When the pixel at `screen` switches in a dissolve, as portal_arrival
     /// in shader.wgsl works it out, but without the noise.
-    fn dissolve_switches(
-        trail: &Trail,
-        map: &DepthMap,
-        uv_scale: [f32; 2],
-        screen: [f32; 2],
-    ) -> f32 {
+    fn dissolve_switches(trail: &Trail, map: &DepthMap, crop: Crop, screen: [f32; 2]) -> f32 {
         let growth = 1.0 - 2.0 * PORTAL_EDGE;
         let first = (trail.points[..trail.len].iter())
             .map(|&[x, y, start, _]| {
-                let d = portal_distance(map, uv_scale, 1.6, [x, y], screen);
+                let d = portal_distance(map, crop, 1.6, [x, y], screen);
                 start + PORTAL_EDGE + pace(trail, d) * growth
             })
             .fold(2.0, f32::min);
@@ -1420,11 +1607,11 @@ mod tests {
         // A slope with sharp bumps all over it.
         let map =
             depth_map(|x, y| y as f32 / 160.0 * 0.6 + ((x * 7 + y * 13) % 23) as f32 / 22.0 * 0.4);
-        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+        let crop = cover(&map);
         for seed in 0..4 {
-            let trail = Trail::scatter(1.6, &map.grid(), uv_scale, seed);
+            let trail = Trail::scatter(1.6, &map.grid(), crop, seed);
             let switches: Vec<f32> = screen_pixels()
-                .map(|s| dissolve_switches(&trail, &map, uv_scale, s))
+                .map(|s| dissolve_switches(&trail, &map, crop, s))
                 .collect();
             for part in [0.25, 0.5, 0.75, 1.0] {
                 let done =
@@ -1438,10 +1625,10 @@ mod tests {
     fn the_dissolve_starts_far_away_and_quickens() {
         // Far away at the top.
         let map = depth_map(|_, y| y as f32 / 160.0);
-        let uv_scale = cover_uv_scale((map.width, map.height), (1600, 1000));
+        let crop = cover(&map);
         let mut first_heights = 0.0;
         for seed in 0..20 {
-            let trail = Trail::scatter(1.6, &map.grid(), uv_scale, seed);
+            let trail = Trail::scatter(1.6, &map.grid(), crop, seed);
             first_heights += trail.points[0][1] / 20.0;
             let starts: Vec<f32> = trail.points[..trail.len].iter().map(|p| p[2]).collect();
             assert!(trail.len > 1 && starts[0] == 0.0, "{starts:?}");
@@ -1454,7 +1641,8 @@ mod tests {
 
     #[test]
     fn the_trail_follows_the_cursor_in_steps() {
-        let mut trail = Trail::new([0.5, 0.5], 1.0, &DepthGrid::flat(), [1.0, 1.0]);
+        let whole = Crop::new((1, 1), (1, 1), View::default(), None);
+        let mut trail = Trail::new([0.5, 0.5], 1.0, &DepthGrid::flat(), whole);
         trail.follow([0.51, 0.5], 0.1, 1.0);
         assert_eq!(trail.len, 1, "a small move doesn't add a point");
         trail.follow([0.6, 0.5], 0.2, 1.0);
@@ -1493,6 +1681,14 @@ mod tests {
         // A 16:10 screen is wider than a 3:2 image, so width sets the size.
         let scale = fit_scale((6000, 4000), &[(1920, 1080), (2560, 1600)]).unwrap();
         assert!((scale - 2560.0 / 6000.0 / 0.95).abs() < 1e-6, "{scale}");
+    }
+
+    #[test]
+    fn images_shrink_to_what_the_gpu_takes() {
+        assert_eq!(limit_scale((8192, 2328), 8192), None);
+        let scale = limit_scale((9313, 2328), 8192).unwrap();
+        let (w, h) = scale_size((9313, 2328), scale);
+        assert!(w.min(8192) == 8192 && h <= 2048, "{w}x{h}");
     }
 
     #[test]

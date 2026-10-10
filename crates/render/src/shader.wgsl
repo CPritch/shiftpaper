@@ -36,9 +36,12 @@ struct Uniforms {
     // 0 shows the current wallpaper, 1 the next one.
     progress: f32,
     // Fraction of each image shown on each axis after cropping to the
-    // screen's aspect ratio.
+    // screen's aspect ratio and zooming in on it, and where in the image,
+    // in image uv, the middle of the screen is.
     uv_scale: vec2<f32>,
     next_uv_scale: vec2<f32>,
+    uv_center: vec2<f32>,
+    next_uv_center: vec2<f32>,
     // Which transition, one of the constants below.
     style: u32,
     // The screen's width over its height.
@@ -102,10 +105,11 @@ const WATER_SHADE: f32 = 0.18;
 // crisper edge, wider a softer one.
 const BAND: f32 = 0.08;
 
-// Crop to the screen's aspect ratio and apply the margin.
-fn crop(uv: vec2<f32>, scale: vec2<f32>) -> vec2<f32> {
+// Screen uv to image uv: the part of the image `scale` of it across,
+// centred on `center`, and the margin.
+fn crop(uv: vec2<f32>, scale: vec2<f32>, center: vec2<f32>) -> vec2<f32> {
     let margin = max(MARGIN, 0.5 * u.intensity);
-    return 0.5 + (uv - 0.5) * scale * (1.0 - 2.0 * margin);
+    return center + (uv - 0.5) * scale * (1.0 - 2.0 * margin);
 }
 
 // The helpers below read the current wallpaper's textures, or the next
@@ -294,7 +298,8 @@ fn portal_arrival(screen_uv: vec2<f32>, depth: f32) -> f32 {
         if start + pace(across + bump) * growth >= first {
             continue;
         }
-        let center = scene_point(point.xy, load_depth(false, crop(point.xy, u.uv_scale)));
+        let under = load_depth(false, crop(point.xy, u.uv_scale, u.uv_center));
+        let center = scene_point(point.xy, under);
         first = min(first, start + pace(distance(here, center) + bump) * growth);
     }
     return timing(first);
@@ -321,8 +326,8 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
         return Blend(weight, weight, 0.0);
     }
     if u.style == TIDE_IN || u.style == TIDE_OUT {
-        let uv = crop(screen_uv, u.uv_scale);
-        let next_uv = crop(screen_uv, u.next_uv_scale);
+        let uv = crop(screen_uv, u.uv_scale, u.uv_center);
+        let next_uv = crop(screen_uv, u.next_uv_scale, u.next_uv_center);
         let under = under_water(uv, depth, next_uv, next_depth, t);
         // The new wallpaper shows under the water coming in, and above it
         // going out.
@@ -379,7 +384,7 @@ fn mix_oklab(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = crop(in.uv, u.uv_scale);
+    let uv = crop(in.uv, u.uv_scale, u.uv_center);
     // Depth comes from the same image position as the colour.
     var depth = load_depth(false, uv);
     if u.progress <= 0.0 {
@@ -389,7 +394,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
     }
 
-    let next_uv = crop(in.uv, u.next_uv_scale);
+    let next_uv = crop(in.uv, u.next_uv_scale, u.next_uv_center);
     let next_depth = load_depth(true, next_uv);
     let blend = transition_blend(in.uv, depth, next_depth, u.progress);
     // Blending depth as well as colour morphs the parallax geometry, and
