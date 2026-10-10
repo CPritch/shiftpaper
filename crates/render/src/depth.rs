@@ -37,10 +37,13 @@ impl DepthMap {
     }
 
     /// The map resized to `width` x `height`.
-    pub fn resized(self, width: u32, height: u32) -> Self {
-        let image =
-            image::ImageBuffer::<image::Luma<u16>, _>::from_raw(self.width, self.height, self.data)
-                .expect("a depth map's data matches its size");
+    pub fn resized(&self, width: u32, height: u32) -> Self {
+        let image = image::ImageBuffer::<image::Luma<u16>, _>::from_raw(
+            self.width,
+            self.height,
+            self.data.as_slice(),
+        )
+        .expect("a depth map's data matches its size");
         Self {
             data: imageops::resize(&image, width, height, FilterType::Triangle).into_raw(),
             width,
