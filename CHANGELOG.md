@@ -8,6 +8,10 @@
 - The renderer is now its own crate, `shiftpaper-render`, with no Wayland code, so other front ends can use it.
 - A `parallax_intensity` above 0.05 zooms the wallpaper in a little more, so the biggest shifts no longer stretch its edges.
 
+### Fixed
+
+- Mali's Vulkan driver no longer crashes compiling the shader. It couldn't cope with textures passed to functions.
+
 ## 0.4.3 - 2026-10-09
 
 ### Changed

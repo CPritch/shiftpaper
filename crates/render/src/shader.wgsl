@@ -108,19 +108,35 @@ fn crop(uv: vec2<f32>, scale: vec2<f32>) -> vec2<f32> {
     return 0.5 + (uv - 0.5) * scale * (1.0 - 2.0 * margin);
 }
 
-fn load_depth(tex: texture_2d<f32>, uv: vec2<f32>) -> f32 {
-    let size = textureDimensions(tex);
-    return textureLoad(tex, vec2<u32>(uv * vec2<f32>(size)), 0).r;
+// The helpers below read the current wallpaper's textures, or the next
+// one's if `next`, rather than taking a texture as an argument. Mali's
+// Vulkan driver crashes compiling a texture passed to a function.
+
+fn load_depth(next: bool, uv: vec2<f32>) -> f32 {
+    if next {
+        let size = textureDimensions(next_depth_tex);
+        return textureLoad(next_depth_tex, vec2<u32>(uv * vec2<f32>(size)), 0).r;
+    }
+    let size = textureDimensions(depth_tex);
+    return textureLoad(depth_tex, vec2<u32>(uv * vec2<f32>(size)), 0).r;
+}
+
+// Depth and height ranks at index `i`.
+fn load_ranks(next: bool, i: u32) -> vec2<f32> {
+    if next {
+        return textureLoad(next_ranks, i, 0).rg;
+    }
+    return textureLoad(ranks, i, 0).rg;
 }
 
 // The fraction of a wallpaper's pixels farther away than `depth`,
 // interpolated from its 257 ranks.
-fn depth_rank(table: texture_1d<f32>, depth: f32) -> f32 {
+fn depth_rank(next: bool, depth: f32) -> f32 {
     let x = clamp(depth, 0.0, 1.0) * 256.0;
     let i = min(u32(x), 255u);
-    let farther = textureLoad(table, i, 0).r;
-    let next = textureLoad(table, i + 1u, 0).r;
-    return mix(farther, next, x - f32(i));
+    let farther = load_ranks(next, i).r;
+    let further = load_ranks(next, i + 1u).r;
+    return mix(farther, further, x - f32(i));
 }
 
 // How far a pixel has switched to the next wallpaper in a sweep. Think of
@@ -137,8 +153,8 @@ fn depth_rank(table: texture_1d<f32>, depth: f32) -> f32 {
 // Depths are compared by rank, so the sweep spends similar time on each
 // part of the picture.
 fn sweep_weight(depth: f32, next_depth: f32, t: f32) -> f32 {
-    let rank = depth_rank(ranks, depth);
-    let next_rank = depth_rank(next_ranks, next_depth);
+    let rank = depth_rank(false, depth);
+    let next_rank = depth_rank(true, next_depth);
     // How far the plane has to travel before this pixel switches.
     let distance = select(max(rank, next_rank), 1.0 - next_rank, u.style == SWEEP_IN);
     return swept(distance, t);
@@ -181,12 +197,12 @@ fn tide_height(uv: vec2<f32>, depth: f32, ground: vec4<f32>) -> f32 {
 
 // The fraction of a wallpaper's pixels lower in the scene than `height`,
 // from the second column of its ranks.
-fn height_rank(table: texture_1d<f32>, height: f32) -> f32 {
+fn height_rank(next: bool, height: f32) -> f32 {
     let x = clamp((height + 1.0) * 0.5, 0.0, 1.0) * 256.0;
     let i = min(u32(x), 255u);
-    let lower = textureLoad(table, i, 0).g;
-    let next = textureLoad(table, i + 1u, 0).g;
-    return mix(lower, next, x - f32(i));
+    let lower = load_ranks(next, i).g;
+    let higher = load_ranks(next, i + 1u).g;
+    return mix(lower, higher, x - f32(i));
 }
 
 // How far under the tide's water a pixel is, in height rank, so negative
@@ -198,9 +214,9 @@ fn height_rank(table: texture_1d<f32>, height: f32) -> f32 {
 fn under_water(uv: vec2<f32>, depth: f32, next_uv: vec2<f32>, next_depth: f32, t: f32) -> f32 {
     let level = t * (1.0 + 2.0 * BAND) - BAND;
     if u.style == TIDE_IN {
-        return level - height_rank(ranks, tide_height(uv, depth, u.ground));
+        return level - height_rank(false, tide_height(uv, depth, u.ground));
     }
-    return (1.0 - level) - height_rank(next_ranks, tide_height(next_uv, next_depth, u.next_ground));
+    return (1.0 - level) - height_rank(true, tide_height(next_uv, next_depth, u.next_ground));
 }
 
 // Small waves across the tide's surface, which move as it does.
@@ -278,7 +294,7 @@ fn portal_arrival(screen_uv: vec2<f32>, depth: f32) -> f32 {
         if start + pace(across + bump) * growth >= first {
             continue;
         }
-        let center = scene_point(point.xy, load_depth(depth_tex, crop(point.xy, u.uv_scale)));
+        let center = scene_point(point.xy, load_depth(false, crop(point.xy, u.uv_scale)));
         first = min(first, start + pace(distance(here, center) + bump) * growth);
     }
     return timing(first);
@@ -365,7 +381,7 @@ fn mix_oklab(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = crop(in.uv, u.uv_scale);
     // Depth comes from the same image position as the colour.
-    var depth = load_depth(depth_tex, uv);
+    var depth = load_depth(false, uv);
     if u.progress <= 0.0 {
         // Cursor right (+x) shifts near pixels left. Scaled by uv_scale so a
         // cropped axis moves the same amount on screen as an uncropped one.
@@ -374,7 +390,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let next_uv = crop(in.uv, u.next_uv_scale);
-    let next_depth = load_depth(next_depth_tex, next_uv);
+    let next_depth = load_depth(true, next_uv);
     let blend = transition_blend(in.uv, depth, next_depth, u.progress);
     // Blending depth as well as colour morphs the parallax geometry, and
     // both images shift by it so they move together.
