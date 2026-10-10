@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- shiftpaperd no longer needs a GPU with 16-bit normalised textures, as depth maps now go to the GPU as 16-bit floats.
+- The renderer is now its own crate, `shiftpaper-render`, with no Wayland code, so other front ends can use it.
+
 ## 0.4.3 - 2026-10-09
 
 ### Changed

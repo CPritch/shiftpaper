@@ -741,6 +741,8 @@ pub struct Renderer {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// The format it draws in, which surfaces must be configured with.
+    pub format: wgpu::TextureFormat,
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
@@ -749,27 +751,24 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                ..Default::default()
-            })
-            .await
-            .context("no suitable GPU adapter found")?;
-
+    /// Draw with `adapter`, from `instance`, to surfaces in `format`. The
+    /// caller picks all three, so each front end can choose the backends
+    /// and format its platform offers.
+    pub async fn new(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self> {
         info!(name = adapter.get_info().name, "using GPU");
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("shiftpaper"),
-                required_features: wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
-                required_limits: wgpu::Limits::default(),
+                required_features: wgpu::Features::empty(),
+                // What even GLES phones manage, with the texture sizes this
+                // adapter supports.
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                    .using_resolution(adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -883,7 +882,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -916,6 +915,7 @@ impl Renderer {
             adapter,
             device,
             queue,
+            format,
             pipeline,
             bind_group_layout,
             sampler,
@@ -924,8 +924,8 @@ impl Renderer {
         })
     }
 
-    /// Create a uniform buffer for an output. Called once per output during
-    /// layer surface configure, and filled in by `step_and_write` before
+    /// Create a uniform buffer for an output. Called once per output when
+    /// its surface is set up, and filled in by `step_and_write` before
     /// the first draw.
     pub fn create_uniform_buffer(&self) -> wgpu::Buffer {
         self.device
@@ -992,13 +992,16 @@ impl Renderer {
             depth_or_array_layers: 1,
         };
 
+        // R16Unorm would hold the map as it is, but it's optional on phones.
+        // A 16-bit float loses precision only near 1, where it's a fraction
+        // of a pixel at any sensible intensity.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth_map"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Unorm,
+            format: wgpu::TextureFormat::R16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -1010,7 +1013,7 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&depth.data),
+            bytemuck::cast_slice(&depth.to_f16()),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(2 * depth.width),
@@ -1117,8 +1120,8 @@ impl Renderer {
     /// so the caller can retry on the next frame callback.
     pub fn render_frame(&self, output: &OutputRenderState) -> bool {
         let frame = match output.surface.get_current_texture() {
-            // A suboptimal frame is still usable, and our size only changes on
-            // a compositor configure, which reconfigures the surface anyway.
+            // A suboptimal frame is still usable, and the front end
+            // reconfigures the surface whenever its size changes anyway.
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
             }
@@ -1182,7 +1185,8 @@ fn create_placeholder_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu:
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R16Unorm,
+        // Zero as a 16-bit float is all zero bytes, like the data below.
+        format: wgpu::TextureFormat::R16Float,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

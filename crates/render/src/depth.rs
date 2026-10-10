@@ -3,7 +3,7 @@ use image::imageops::{self, FilterType};
 use std::path::Path;
 
 /// Depth map at the wallpaper's native resolution.
-/// Values are u16 normalized, the GPU treats them as [0.0, 1.0] via R16Unorm.
+/// Values are u16 normalized, from 0 (the farthest) to 1 (the nearest).
 pub struct DepthMap {
     pub data: Vec<u16>,
     pub width: u32,
@@ -29,6 +29,13 @@ pub fn load_depth_map(path: &Path) -> Result<DepthMap> {
 pub const RANK_POINTS: usize = 257;
 
 impl DepthMap {
+    /// The map as 16-bit floats from 0 to 1, as the GPU takes it.
+    pub fn to_f16(&self) -> Vec<half::f16> {
+        (self.data.iter())
+            .map(|&d| half::f16::from_f32(f32::from(d) / f32::from(u16::MAX)))
+            .collect()
+    }
+
     /// The map resized to `width` x `height`.
     pub fn resized(self, width: u32, height: u32) -> Self {
         let image =
