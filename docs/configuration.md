@@ -23,7 +23,7 @@ transition_secs = 2
 
 | Setting | Default | What it does |
 |---|---|---|
-| `parallax_intensity` | `0.025` | How far the wallpaper moves. Past about `0.05`, the edges of the image start to show. |
+| `parallax_intensity` | `0.025` | How far the wallpaper moves. Past about `0.05`, it zooms in a little more to keep the edges of the image hidden. |
 | `transition` | `"sweep-in"` | How one wallpaper changes into the next. See [transitions](transitions.md). |
 | `transition_secs` | `3` | How long a transition takes, in seconds. `0` switches straight away. |
 | `tracking_mode` | `"pointer"` | How the cursor is followed. See below. Needs a restart. |
