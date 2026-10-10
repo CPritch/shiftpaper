@@ -63,9 +63,10 @@ struct Uniforms {
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
-// Zoom in 2.5% each side so displacement pulls in real pixels from beyond
-// the visible area instead of stretching the edges. Must match MARGIN in
-// renderer.rs.
+// Zoom in each side so displacement pulls in real pixels from beyond the
+// visible area instead of stretching the edges: by at least 2.5%, and by
+// half the intensity, as far as anything shifts. Must match MARGIN and
+// `margin` in renderer.rs.
 const MARGIN: f32 = 0.025;
 // Transitions. Must match `shader_style` in renderer.rs.
 const SWEEP_IN: u32 = 0u;
@@ -103,7 +104,8 @@ const BAND: f32 = 0.08;
 
 // Crop to the screen's aspect ratio and apply the margin.
 fn crop(uv: vec2<f32>, scale: vec2<f32>) -> vec2<f32> {
-    return 0.5 + (uv - 0.5) * scale * (1.0 - 2.0 * MARGIN);
+    let margin = max(MARGIN, 0.5 * u.intensity);
+    return 0.5 + (uv - 0.5) * scale * (1.0 - 2.0 * margin);
 }
 
 fn load_depth(tex: texture_2d<f32>, uv: vec2<f32>) -> f32 {

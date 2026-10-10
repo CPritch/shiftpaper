@@ -293,10 +293,10 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
 }
 
-/// Screen uv to image uv for an image cropped by `uv_scale`, as crop in
-/// shader.wgsl, on one axis.
+/// Screen uv to image uv for an image cropped and zoomed by `uv_scale`,
+/// from `zoomed`, as crop in shader.wgsl, on one axis.
 fn to_image(screen: f32, uv_scale: f32) -> f32 {
-    0.5 + (screen - 0.5) * uv_scale * (1.0 - 2.0 * MARGIN)
+    0.5 + (screen - 0.5) * uv_scale
 }
 
 /// The cell of a DepthGrid that image uv `image` is in, on one axis.
@@ -374,8 +374,7 @@ impl ScreenCell {
 /// The cells of `grid` that show on a screen, once cropped by `uv_scale`.
 fn screen_cells(grid: &DepthGrid, uv_scale: [f32; 2]) -> Vec<ScreenCell> {
     // As crop in shader.wgsl, backwards.
-    let to_screen =
-        |image: f32, axis: usize| 0.5 + (image - 0.5) / (uv_scale[axis] * (1.0 - 2.0 * MARGIN));
+    let to_screen = |image: f32, axis: usize| 0.5 + (image - 0.5) / uv_scale[axis];
     let mut cells = Vec::with_capacity(grid.cells.len());
     for row in 0..GRID_CELLS {
         let top = to_screen(row as f32 / GRID_CELLS as f32, 1).max(0.0);
@@ -434,9 +433,23 @@ impl Random {
     }
 }
 
-/// How far the shader zooms in on each side. Must match MARGIN in
+/// How far the shader zooms in on each side, at least. Must match MARGIN in
 /// shader.wgsl.
 const MARGIN: f32 = 0.025;
+
+/// How far the shader zooms in on each side at `intensity`: enough that the
+/// biggest shift still pulls in real pixels from beyond the screen, and at
+/// least MARGIN. As crop in shader.wgsl.
+fn margin(intensity: f32) -> f32 {
+    MARGIN.max(0.5 * intensity)
+}
+
+/// `uv_scale` zoomed in by the margin at `intensity`, as crop in
+/// shader.wgsl does: how much of the image shows on each axis.
+fn zoomed(uv_scale: [f32; 2], intensity: f32) -> [f32; 2] {
+    let zoom = 1.0 - 2.0 * margin(intensity);
+    [uv_scale[0] * zoom, uv_scale[1] * zoom]
+}
 
 /// A wallpaper's images decoded into memory, ready to upload. Decoding is
 /// the slow part, so it can happen off the main thread.
@@ -512,6 +525,7 @@ fn fit_scale((width, height): (u32, u32), screens: &[(u32, u32)]) -> Option<f32>
         .map(|&(w, h)| f32::max(w as f32 / width as f32, h as f32 / height as f32))
         .fold(0.0, f32::max)
         // The shader zooms in a little, which needs a little more detail.
+        // A stronger parallax zooms in a few percent more, too little to see.
         / (1.0 - 2.0 * MARGIN);
     (needed > 0.0 && needed < 1.0).then_some(needed)
 }
@@ -558,6 +572,8 @@ pub struct OutputRenderState {
     uniform_buffer: wgpu::Buffer,
     current_offset: (f32, f32),
     pub target_offset: (f32, f32),
+    /// The intensity `step_and_write` last drew with, which sets the margin.
+    intensity: f32,
 }
 
 impl OutputRenderState {
@@ -578,6 +594,7 @@ impl OutputRenderState {
             uniform_buffer,
             current_offset: (0.0, 0.0),
             target_offset: (0.0, 0.0),
+            intensity: 0.0,
         }
     }
 
@@ -611,7 +628,8 @@ impl OutputRenderState {
         }
         self.bind_group = renderer.create_bind_group(&self.current, &next, &self.uniform_buffer);
         let (x, y) = self.current_offset;
-        let uv_scale = cover_uv_scale(self.current.size, (self.config.width, self.config.height));
+        let screen = (self.config.width, self.config.height);
+        let uv_scale = zoomed(cover_uv_scale(self.current.size, screen), self.intensity);
         let trail = match style {
             Transition::Dissolve => {
                 let seed = SystemTime::now()
@@ -658,6 +676,7 @@ impl OutputRenderState {
     /// uniforms. Returns whether anything changed, so callers can skip
     /// redrawing once the offset has settled and no transition is running.
     pub fn step_and_write(&mut self, queue: &wgpu::Queue, intensity: f32) -> bool {
+        self.intensity = intensity;
         let (tx, ty) = self.target_offset;
         let (cx, cy) = self.current_offset;
         let nx = cx + (tx - cx) * 0.3;
@@ -1276,7 +1295,7 @@ mod tests {
     ) -> f32 {
         // As crop, load_depth and scene_point in shader.wgsl.
         let point = |s: [f32; 2]| {
-            let image = |axis: usize| 0.5 + (s[axis] - 0.5) * uv_scale[axis] * (1.0 - 2.0 * MARGIN);
+            let image = |axis: usize| 0.5 + (s[axis] - 0.5) * uv_scale[axis];
             let x = ((image(0) * map.width as f32) as u32).min(map.width - 1);
             let y = ((image(1) * map.height as f32) as u32).min(map.height - 1);
             let depth = f32::from(map.data[(y * map.width + x) as usize]) / 65535.0;
@@ -1457,6 +1476,16 @@ mod tests {
     fn margin_matches_the_shader() {
         let line = format!("const MARGIN: f32 = {MARGIN};");
         assert!(include_str!("shader.wgsl").contains(&line), "{line}");
+    }
+
+    #[test]
+    fn the_margin_covers_the_biggest_shift() {
+        for intensity in [0.0, 0.025, 0.05, 0.08, 0.2] {
+            // Offsets reach 0.5 and depths 1, so nothing shifts further.
+            let shift = 0.5 * intensity;
+            assert!(margin(intensity) >= shift.max(MARGIN), "{intensity}");
+        }
+        assert!(include_str!("shader.wgsl").contains("max(MARGIN, 0.5 * u.intensity)"));
     }
 
     #[test]
