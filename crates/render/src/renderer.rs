@@ -38,6 +38,11 @@ struct Uniforms {
     /// Where the ground is in each wallpaper, for the tide.
     ground: [f32; 4],
     next_ground: [f32; 4],
+    /// The effect playing, from `shader_effect`, or 0 for none, how far
+    /// through it is, from 0 to 1, and where it starts from, in screen uv.
+    effect: u32,
+    effect_progress: f32,
+    effect_origin: [f32; 2],
 }
 
 /// How many points a trail can hold. Must match TRAIL_POINTS in
@@ -637,6 +642,45 @@ pub struct Wallpaper {
     pub view: View,
 }
 
+/// A short effect played over the wallpaper showing, such as as a phone
+/// unlocks. Each one moves through the depth of the scene for a moment and
+/// leaves it exactly as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// A ripple spreads from a point like a drop in water, over the
+    /// surface there first and on through the scene, wrapping round things
+    /// nearer and further away, as the portal does.
+    Ripple,
+    /// A swell rolls from the nearest things to the furthest, each pushing
+    /// toward the viewer for a moment as it passes.
+    Swell,
+    /// A band of light passes through the scene from near to far, and each
+    /// surface lifts a little as it catches it.
+    Glint,
+}
+
+impl Effect {
+    pub const ALL: [Effect; 3] = [Effect::Ripple, Effect::Swell, Effect::Glint];
+
+    /// Its name, as front ends can ask for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effect::Ripple => "ripple",
+            Effect::Swell => "swell",
+            Effect::Glint => "glint",
+        }
+    }
+}
+
+/// An effect that's under way.
+#[derive(Clone, Copy)]
+struct ActiveEffect {
+    effect: Effect,
+    start: Instant,
+    duration: Duration,
+    origin: [f32; 2],
+}
+
 /// A transition to another wallpaper that's under way.
 struct ActiveTransition {
     next: Wallpaper,
@@ -663,6 +707,8 @@ pub struct OutputRenderState {
     pan: Option<f32>,
     /// Whether the view or pan changed since `step_and_write` last ran.
     view_changed: bool,
+    /// From `start_effect`, until it's run its course.
+    effect: Option<ActiveEffect>,
 }
 
 impl OutputRenderState {
@@ -686,6 +732,7 @@ impl OutputRenderState {
             intensity: 0.0,
             pan: None,
             view_changed: false,
+            effect: None,
         }
     }
 
@@ -759,6 +806,24 @@ impl OutputRenderState {
         });
     }
 
+    /// Play `effect` over the wallpaper showing for `duration`, starting
+    /// from `origin` in screen uv, from 0 to 1 across and down, where it
+    /// starts from one place. An effect already playing stops. Effects show
+    /// over a wallpaper at rest, not during a transition.
+    pub fn start_effect(&mut self, effect: Effect, duration: Duration, origin: [f32; 2]) {
+        self.effect = Some(ActiveEffect {
+            effect,
+            start: Instant::now(),
+            duration,
+            origin,
+        });
+    }
+
+    /// Whether an effect is playing.
+    pub fn is_playing_effect(&self) -> bool {
+        self.effect.is_some()
+    }
+
     /// Once a transition has run its course, make its wallpaper the current
     /// one. Call after drawing, so the final frame of the transition has
     /// been shown.
@@ -813,6 +878,10 @@ impl OutputRenderState {
             next.view,
             self.pan,
         );
+        // An effect that's run its course draws one last frame without it.
+        let effect = self.effect.filter(|e| e.start.elapsed() < e.duration);
+        let had_effect = self.effect.is_some();
+        self.effect = effect;
         let uniforms = Uniforms {
             cursor_offset: [nx, ny],
             intensity,
@@ -830,11 +899,14 @@ impl OutputRenderState {
             portal_timing: trail.map_or(Zeroable::zeroed(), |t| t.timing),
             ground: self.current.ground.0,
             next_ground: next.ground.0,
+            effect: effect.map_or(0, |e| shader_effect(e.effect)),
+            effect_progress: effect.map_or(0.0, |e| effect_progress(e.start.elapsed(), e.duration)),
+            effect_origin: effect.map_or([0.5, 0.5], |e| e.origin),
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         let moved = (nx - cx).abs() > 1e-5 || (ny - cy).abs() > 1e-5;
         let view_changed = std::mem::take(&mut self.view_changed);
-        moved || view_changed || self.transition.is_some()
+        moved || view_changed || self.transition.is_some() || had_effect
     }
 }
 
@@ -850,6 +922,25 @@ fn shader_style(style: Transition) -> u32 {
         Transition::TideIn => 5,
         Transition::TideOut => 6,
     }
+}
+
+/// The shader's number for each effect, from 1, as 0 is none. Must match
+/// the constants in shader.wgsl.
+fn shader_effect(effect: Effect) -> u32 {
+    match effect {
+        Effect::Ripple => 1,
+        Effect::Swell => 2,
+        Effect::Glint => 3,
+    }
+}
+
+/// How far through an effect we are, from 0 to 1, evenly: each effect
+/// eases itself in the shader.
+fn effect_progress(elapsed: Duration, duration: Duration) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0)
 }
 
 /// How far through a transition we are, eased in and out so it
@@ -1446,6 +1537,37 @@ mod tests {
             let line = format!("const {name}: u32 = {}u;", shader_style(style));
             assert!(src.contains(&line), "{line}");
         }
+    }
+
+    #[test]
+    fn effect_numbers_match_the_shader() {
+        let src = include_str!("shader.wgsl");
+        assert!(src.contains("const NO_EFFECT: u32 = 0u;"));
+        for (name, effect) in [
+            ("EFFECT_RIPPLE", Effect::Ripple),
+            ("EFFECT_SWELL", Effect::Swell),
+            ("EFFECT_GLINT", Effect::Glint),
+        ] {
+            let line = format!("const {name}: u32 = {}u;", shader_effect(effect));
+            assert!(src.contains(&line), "{line}");
+        }
+    }
+
+    #[test]
+    fn effects_have_their_own_names() {
+        for effect in Effect::ALL {
+            let same = Effect::ALL.iter().filter(|e| e.as_str() == effect.as_str());
+            assert_eq!(same.count(), 1, "{}", effect.as_str());
+        }
+    }
+
+    #[test]
+    fn effects_run_evenly_to_their_end() {
+        let second = Duration::from_secs(1);
+        assert_eq!(effect_progress(Duration::ZERO, second), 0.0);
+        assert_eq!(effect_progress(second / 4, second), 0.25);
+        assert_eq!(effect_progress(second * 2, second), 1.0);
+        assert_eq!(effect_progress(second, Duration::ZERO), 1.0);
     }
 
     #[test]

@@ -6,6 +6,6 @@ mod depth;
 mod renderer;
 
 pub use renderer::{
-    DecodedWallpaper, OutputRenderState, Renderer, View, Wallpaper, WallpaperFiles,
+    DecodedWallpaper, Effect, OutputRenderState, Renderer, View, Wallpaper, WallpaperFiles,
 };
 pub use shiftpaper_config::Transition;
