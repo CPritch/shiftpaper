@@ -479,8 +479,30 @@ fn mix_oklab(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
     return vec4<f32>(clamp(from_oklab(lab), vec3<f32>(0.0), vec3<f32>(1.0)), mix(a.a, b.a, t));
 }
 
+// Whether the screen's format stores colour sRGB-encoded without saying so,
+// like Rgba8Unorm, so the shader encodes it rather than the GPU. Set by the
+// renderer from the format it draws in. A screen offering no sRGB format,
+// as some GLES ones don't, would otherwise show linear colour, too dark.
+override ENCODE_SRGB: bool = false;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = shade(in);
+    if ENCODE_SRGB {
+        return vec4<f32>(linear_to_srgb(color.rgb), color.a);
+    }
+    return color;
+}
+
+// Linear colour sRGB-encoded, as an sRGB format's write does.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let low = c * 12.92;
+    let high = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(high, low, c <= vec3<f32>(0.0031308));
+}
+
+// The colour of one pixel of the wallpaper, in linear sRGB.
+fn shade(in: VertexOutput) -> vec4<f32> {
     let uv = crop(in.uv, u.uv_scale, u.uv_center);
     // Depth comes from the same image position as the colour.
     var depth = load_depth(false, uv);

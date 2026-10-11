@@ -1099,6 +1099,12 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
+        // A screen without an sRGB format gets colour the shader encodes itself.
+        let encode_srgb = if needs_srgb_encoding(format) {
+            1.0
+        } else {
+            0.0
+        };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shiftpaper_rp"),
             layout: Some(&pipeline_layout),
@@ -1116,7 +1122,10 @@ impl Renderer {
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("ENCODE_SRGB", encode_srgb)],
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1443,9 +1452,28 @@ fn create_placeholder_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu:
     tex
 }
 
+/// Whether `format` stores colour sRGB-encoded without the GPU encoding it
+/// on write, so the shader has to: an 8 or 10 bit unorm format without the
+/// sRGB suffix. Float formats hold linear colour, so they're left alone.
+fn needs_srgb_encoding(format: wgpu::TextureFormat) -> bool {
+    use wgpu::TextureFormat::*;
+    matches!(format, Rgba8Unorm | Bgra8Unorm | Rgb10a2Unorm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_unorm_formats_without_srgb_are_encoded_by_the_shader() {
+        use wgpu::TextureFormat::*;
+        for format in [Rgba8Unorm, Bgra8Unorm, Rgb10a2Unorm] {
+            assert!(needs_srgb_encoding(format), "{format:?}");
+        }
+        for format in [Rgba8UnormSrgb, Bgra8UnormSrgb, Rgba16Float] {
+            assert!(!needs_srgb_encoding(format), "{format:?}");
+        }
+    }
 
     fn assert_close(actual: [f32; 2], expected: [f32; 2]) {
         assert!(

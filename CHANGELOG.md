@@ -17,6 +17,7 @@
 ### Fixed
 
 - Mali's Vulkan driver no longer crashes compiling the shader. It couldn't cope with textures passed to functions.
+- Wallpapers no longer draw too dark on screens that offer no sRGB format, as some GLES ones don't. The shader now encodes the colour itself for an `Rgba8Unorm`, `Bgra8Unorm` or `Rgb10a2Unorm` surface.
 
 ## 0.4.3 - 2026-10-09
 
