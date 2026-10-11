@@ -10,6 +10,10 @@
 - `shiftpaper-render` can show any part of a wallpaper, zoomed in and moved, and pan across it, for front ends that let people frame their photos or follow a launcher's pages.
 - A wallpaper bigger than the GPU's largest texture is shrunk to fit it, instead of failing to show.
 
+### Added
+
+- `shiftpaper-render` can play a short effect over a wallpaper at rest, for front ends to mark a moment such as a phone unlocking: `ripple` spreads from a point through the scene, reaching near things before far ones beside them; `swell` rolls from near to far, each part of the scene leaning toward the viewer as it passes; `glint` passes a band of light back through the scene. Each leaves the wallpaper exactly as it was.
+
 ### Fixed
 
 - Mali's Vulkan driver no longer crashes compiling the shader. It couldn't cope with textures passed to functions.

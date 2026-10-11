@@ -63,6 +63,11 @@ struct Uniforms {
     // `tide_height`.
     ground: vec4<f32>,
     next_ground: vec4<f32>,
+    // The effect playing, one of the constants below, how far through it
+    // is, from 0 to 1, and where it starts from, in screen uv.
+    effect: u32,
+    effect_progress: f32,
+    effect_origin: vec2<f32>,
 };
 @group(0) @binding(3) var<uniform> u: Uniforms;
 
@@ -99,6 +104,38 @@ const TIDE_NEAR: f32 = 0.1;
 const WATER_DEPTH: f32 = 0.15;
 const RIPPLE: f32 = 0.0025;
 const WATER_SHADE: f32 = 0.18;
+
+// Effects, played over a wallpaper at rest. Must match `shader_effect` in
+// renderer.rs.
+const NO_EFFECT: u32 = 0u;
+const EFFECT_RIPPLE: u32 = 1u;
+const EFFECT_SWELL: u32 = 2u;
+const EFFECT_GLINT: u32 = 3u;
+// How far the ripple's distances go into depth: a pixel's distance from
+// where it starts is how far across the screen it is, in screen heights,
+// plus this much of how far back it is by depth rank, so it wraps round
+// near things before going on behind them.
+const RIPPLE_DEPTH: f32 = 0.9;
+// How long its waves are, in those units, how far behind the front they
+// die away, and how far they move the picture at first, as a fraction of
+// the screen.
+const RIPPLE_WAVELENGTH: f32 = 0.085;
+const RIPPLE_TRAIL: f32 = 0.32;
+const RIPPLE_AMOUNT: f32 = 0.022;
+// How much lighter its crests are, and darker its troughs.
+const RIPPLE_LIGHT: f32 = 0.22;
+// How wide the swell is, in depth rank, how far it pushes things toward
+// the viewer, as a fraction of their distance from the middle of the
+// screen, and how much it lightens them.
+const SWELL_BAND: f32 = 0.16;
+const SWELL_AMOUNT: f32 = 0.06;
+const SWELL_LIGHT: f32 = 0.08;
+// How wide the glint's band of light is, in depth rank, how bright, and
+// how far it lifts what it lights, as a fraction of the screen.
+const GLINT_BAND: f32 = 0.06;
+const GLINT_LIGHT: f32 = 0.5;
+const GLINT_LIFT: f32 = 0.006;
+const PI: f32 = 3.14159265;
 
 // Half the width of the band of ranks part way through switching at any
 // moment, in the sweeps, the dissolve and the tide. Narrower gives a
@@ -339,6 +376,66 @@ fn transition_blend(screen_uv: vec2<f32>, depth: f32, next_depth: f32, t: f32) -
     return Blend(weight, weight, 0.0);
 }
 
+// What an effect does to a pixel: moves where its colour comes from, in
+// screen uv, darkens or lightens it by `shade`, then adds `light`.
+struct EffectAt {
+    offset: vec2<f32>,
+    shade: f32,
+    light: f32,
+};
+
+// The effect playing, at a pixel at rest at `depth`.
+fn effect_at(screen_uv: vec2<f32>, depth: f32) -> EffectAt {
+    let t = u.effect_progress;
+    if u.effect == EFFECT_RIPPLE {
+        return ripple(screen_uv, depth, t);
+    }
+    // The swell and glint travel through depth rank from the nearest
+    // things to the furthest, like the sweeps, so each takes a similar
+    // share of the effect whatever the scene.
+    let near_first = 1.0 - depth_rank(false, depth);
+    if u.effect == EFFECT_SWELL {
+        let x = (near_first - travelled(t, SWELL_BAND)) / SWELL_BAND;
+        let swell = exp(-x * x) * (1.0 - t);
+        // Taking its colour from nearer the middle makes a part of the
+        // scene look closer, as if it came toward the viewer.
+        return EffectAt(-(screen_uv - 0.5) * swell * SWELL_AMOUNT, 1.0 + swell * SWELL_LIGHT, 0.0);
+    }
+    let x = (near_first - travelled(t, GLINT_BAND)) / GLINT_BAND;
+    let glint = exp(-x * x) * sqrt(1.0 - t);
+    return EffectAt(vec2<f32>(0.0, glint * GLINT_LIFT), 1.0, glint * GLINT_LIGHT);
+}
+
+// Where a band `band` wide has got to through depth rank at `t`: from
+// just before the nearest things at the start to just past the furthest at
+// the end, so every pixel sees it whole, easing in and out.
+fn travelled(t: f32, band: f32) -> f32 {
+    let eased = t * t * (3.0 - 2.0 * t);
+    return eased * (1.0 + 4.0 * band) - 2.0 * band;
+}
+
+// A ripple from the effect's origin, like a drop in water. It crosses the
+// screen and goes back through the scene at once, so it reaches near
+// things before far ones beside them and wraps round them, at a steady
+// pace from the origin to the furthest corner. The waves behind its front
+// move the picture to and from the origin, and light and shade it, dying
+// away as it goes.
+fn ripple(screen_uv: vec2<f32>, depth: f32, t: f32) -> EffectAt {
+    let away = (screen_uv - u.effect_origin) * vec2<f32>(u.aspect, 1.0);
+    let back = 1.0 - depth_rank(false, depth);
+    let distance = length(away) + RIPPLE_DEPTH * back;
+    // Far enough to pass the furthest corner of the screen, at the back,
+    // with its trail.
+    let corner = length(vec2<f32>(max(u.effect_origin.x, 1.0 - u.effect_origin.x) * u.aspect, max(u.effect_origin.y, 1.0 - u.effect_origin.y)));
+    let front = (corner + RIPPLE_DEPTH + RIPPLE_TRAIL) * t;
+    let behind = front - distance;
+    // Only behind the front, fading out over the trail behind it.
+    let trail = select(0.0, exp(-behind / RIPPLE_TRAIL), behind >= 0.0);
+    let wave = sin(behind / RIPPLE_WAVELENGTH * 2.0 * PI) * trail * (1.0 - t);
+    let outward = away / max(length(away), 0.001) / vec2<f32>(u.aspect, 1.0);
+    return EffectAt(outward * wave * RIPPLE_AMOUNT, 1.0 + wave * RIPPLE_LIGHT, 0.0);
+}
+
 // Linear sRGB to Oklab, from https://bottosson.github.io/posts/oklab/
 fn to_oklab(c: vec3<f32>) -> vec3<f32> {
     let lms = vec3<f32>(
@@ -391,7 +488,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Cursor right (+x) shifts near pixels left. Scaled by uv_scale so a
         // cropped axis moves the same amount on screen as an uncropped one.
         let shift = u.cursor_offset * depth * u.intensity;
-        return textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
+        if u.effect == NO_EFFECT {
+            return textureSample(color_tex, tex_sampler, uv - shift * u.uv_scale);
+        }
+        let fx = effect_at(in.uv, depth);
+        let color = textureSample(color_tex, tex_sampler, uv + (fx.offset - shift) * u.uv_scale);
+        let shaded = clamp(color.rgb * fx.shade, vec3<f32>(0.0), vec3<f32>(1.0));
+        // Light catches the brighter parts most, like a sheen, a touch warm.
+        let sheen = smoothstep(0.1, 0.8, dot(shaded, vec3<f32>(0.2126, 0.7152, 0.0722)));
+        let light = fx.light * sheen * vec3<f32>(1.0, 0.94, 0.84);
+        return vec4<f32>(shaded + (1.0 - shaded) * light, color.a);
     }
 
     let next_uv = crop(in.uv, u.next_uv_scale, u.next_uv_center);
